@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "yuanwei"
-version = "0.1.0a1"
-description = "原委：事有原委，话有出处。给 AI 助手用的长期记忆（预览版）"
+version = "0.1.0a2"
+description = "Yuanwei (原委): long-term memory for AI assistants. Every memory has its origin; every quote has its source. 给 AI 助手的长期记忆（预览版）"
 requires-python = ">=3.11"
 dependencies = []
 readme = "README.md"

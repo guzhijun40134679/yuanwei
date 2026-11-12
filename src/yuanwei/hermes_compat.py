@@ -1,7 +1,7 @@
 """我们依赖 Hermes 的哪些东西，以及怎么核（用户的要求：Hermes 每次升级，不要让我们重写很多东西）。
 
 设计：
-* **接头要薄**：插件文件只 import Hermes 公开的记忆插件基类（agent.memory_provider.MemoryProvider），规则全在 yuanwei 核心里。适配器另外**懒导入**三处 Hermes 内部模块（用到时才导入，导入或调用失败就退回保守做法，见下面 owner_identity、runtime_cwd 两条；Python 环境那条是跑 hermes 命令，不是 import）。
+* **接头要薄**：插件文件只 import Hermes 公开的记忆插件基类（agent.memory_provider.MemoryProvider），规则全在 yuanwei 核心里。适配器另外**懒导入**几处 Hermes 内部模块（用到时才导入，导入或调用失败就退回保守做法，见下面 owner_identity、runtime_cwd、host_turn_cwd 三条；Python 环境那条是跑 hermes 命令，不是 import）。
 * **按功能探测，不按版本号写死**：运行时（probe_features）看基类里有没有我们要用的方法、参数对不对；对不上的那一项功能关掉、原因写进状态，别的照常，Hermes 本身照常工作。
 * **一条核对命令**：yuanwei doctor hermes 读本机装着的 Hermes 源码（只读，不执行、不碰 ~/.hermes 的配置记忆会话），对着下面 DEPENDENCIES 逐项核，输出哪项对、哪项变了、影响哪些功能。
 * DEPENDENCIES 是唯一的清单：doctor、兼容表第 9 节、测试都从它来。要依赖新东西，先加到这里。
@@ -32,13 +32,15 @@ DEPENDENCIES = [
     {"id": "provider_activation", "what": "memory.provider 这个设置键选定外部记忆提供者", "where": "hermes_cli/memory_setup.py: config[\"memory\"][\"provider\"]",
      "affects": ["install"], "if_changed": "setup/uninstall 改的键变了：改 hermes_setup.py 里的 MEMORY_PROVIDER_KEY"},
     {"id": "init_kwargs", "what": "宿主初始化插件时总会传 agent_context、platform、hermes_home，有会话工作目录就传 cwd", "where": "agent/agent_init.py: _memory_provider_init_kwargs（老版本是 initialize 前拼的 _init_kwargs）",
-     "affects": ["agent_context", "workspace"], "if_changed": "agent_context 缺了：这个实例按「说不清」处理，不读不写（不当成主对话）；cwd 没给时（Hermes 只有会话有工作目录才传）：经典终端（平台 cli）取 Hermes 进程目录（优先 resolve_agent_cwd）照项目库判，其他本机入口（tui、desktop、local）和网关平台记进「生活」；cwd 这个键整个不传了：经典终端也只靠进程目录，别的入口全部落进生活"},
+     "affects": ["agent_context", "workspace"], "if_changed": "agent_context 缺了：这个实例按「说不清」处理，不读不写（不当成主对话）；cwd 没给时（Hermes 只有会话有工作目录才传）：经典终端（平台 cli）取 Hermes 进程目录（优先 resolve_agent_cwd）照项目库判；其他本机入口（tui、desktop、local）先问 Hermes 这一轮的文件夹（见 host_turn_cwd），问不到才记进「生活」；网关聊天平台记进「生活」、不问；cwd 这个键整个不传了：经典终端也只靠进程目录，别的本机入口靠 host_turn_cwd，都不行就落进生活"},
     {"id": "projects_db", "what": "项目库：$HERMES_HOME/projects.db 的 projects(id, name, archived) 和 project_folders(project_id, path)；项目归属＝cwd 在文件夹里（最长的赢，归档的不算）", "where": "hermes_cli/projects_db.py: projects_db_path、SCHEMA_SQL、project_for_path",
      "affects": ["workspace"], "if_changed": "认不出项目：这一轮不读不写（不落进生活）；这一版没有项目功能：所有对话落进生活；要重核 hermes_workspace.resolve 的规则"},
     {"id": "owner_identity", "what": "gateway.owner_identity.host_owner_subject()：tui／desktop 带着登录身份时，拿它和宿主主人的系统身份比，一样才当主人（适配器懒导入，只比较、只在内存里用）", "where": "gateway/owner_identity.py: host_owner_subject",
      "affects": ["login_owner"], "if_changed": "没有这个函数或调不了：带登录身份的 tui／desktop 不当主人（login_identity_unverifiable），要在设置里配 owners 才记；经典终端和 local 不受影响"},
     {"id": "runtime_cwd", "what": "agent.runtime_cwd.resolve_agent_cwd()：智能体在哪个目录干活（适配器懒导入，经典终端没给 cwd 时用）", "where": "agent/runtime_cwd.py: resolve_agent_cwd",
      "affects": ["workspace"], "if_changed": "没有这个函数或调不了：退回 os.getcwd()（Hermes 进程目录），可能和配置的工作目录不一样"},
+    {"id": "host_turn_cwd", "what": "agent.runtime_cwd.scoped_session_cwd()，取不到再 gateway.session_policy.active_policy().cwd：宿主没传 cwd 时（桌面版建助手不传，Hermes 上游 #144869），问 Hermes「这一轮的文件夹」（适配器懒导入，只给 local、tui、desktop 用；绝不用进程目录；2026-11-12，小问题 28）", "where": "agent/runtime_cwd.py: scoped_session_cwd；gateway/session_policy.py: active_policy",
+     "affects": ["workspace"], "if_changed": "两个函数都没有：桌面版会退回记进「生活」；插件照常工作，这不是致命错误；只缺一个时至少还有一个候选接口在（有任意一个来源就报 ok，doctor 照实列出哪个在、哪个不在；实际能不能取到值、作用域对不对，要另外核）；等 Hermes 上游修好 #144869、直接传 cwd 以后，这一项就不再需要"},
     {"id": "runtime_python", "what": "hermes --print-runtime-command --module site：问 Hermes 自己用哪个 Python 和 sys.path，装 NumPy、查 NumPy 都靠它找「Hermes 实际用的环境」（向导跑这条命令，不 import）", "where": "hermes_cli/_launchers.py: print_runtime_command（--module、--print-runtime-command）",
      "affects": ["numpy_install"], "if_changed": "找不到 Hermes 的真实 Python 环境：不替你装 NumPy、状态里写「没能确认」，向量退回只用关键词；可以用 --hermes-python 自己指一个"},
     {"id": "tool_schemas_at_registration", "what": "MemoryManager.add_provider 在 initialize 之前就调 get_tool_schemas()，并把工具名记进路由表、不再刷新（所以插件在初始化之前也要交固定的工具清单）；agent_init 里先 add_provider 再 initialize", "where": "agent/memory_manager.py: MemoryManager.add_provider；agent/agent_init.py: add_provider 在 initialize_for_agent／initialize_all 之前",
@@ -318,6 +320,22 @@ def _check_lazy(rd):
             out.append(_res(dep, "changed", absent if err == "missing" else "读不懂 %s" % rel))
         else:
             out.append(_res(dep, "ok" if _function_node(tree, fn) else "changed", "%s 里有 %s()" % (rel, fn) if _function_node(tree, fn) else absent))
+    dep = _dep("host_turn_cwd")
+    gone, have = [], []
+    for rel, fn, label in (("agent/runtime_cwd.py", "scoped_session_cwd", "agent.runtime_cwd.scoped_session_cwd"), ("gateway/session_policy.py", "active_policy", "gateway.session_policy.active_policy")):
+        tree, err = _parse(rd, rel)
+        if tree is None:
+            gone.append("%s（%s）" % (label, "没有 %s" % rel if err == "missing" else "读不懂 %s" % rel))
+        elif _function_node(tree, fn) is None:
+            gone.append("%s（%s 里没有 %s）" % (label, rel, fn))
+        else:
+            have.append(label)
+    if not gone:
+        out.append(_res(dep, "ok", "有 agent.runtime_cwd.scoped_session_cwd() 和 gateway.session_policy.active_policy()"))
+    elif have:                                                                           # 至少还有一个候选接口在：ok（只说明接口存在，取值和作用域要另外核），照实说哪个在、哪个不在
+        out.append(_res(dep, "ok", "只有 %s，至少还有一个候选接口在（实际能不能取到值、作用域对不对，要另外核）；找不到：%s" % ("、".join(have), "；".join(gone))))
+    else:
+        out.append(_res(dep, "changed", "两个都找不到：%s；桌面版会退回记进「生活」（插件照常工作，不是致命错误）" % "；".join(gone)))
     dep = _dep("runtime_python")
     t = rd("hermes_cli/_launchers.py")
     if t is None:

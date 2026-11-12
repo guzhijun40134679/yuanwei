@@ -1,5 +1,5 @@
 name: yuanwei
-version: 0.1.0a1
+version: 0.1.0a2
 description: "原委：长期记忆（原话落盘，按需取回）。由 yuanwei setup hermes 安装。"
 # 告诉 Hermes 原委需要 NumPy（向量那一路读取时才 import；缺了照常退回只用关键词）。Hermes 重建它的包环境时会带上当前记忆提供者声明的依赖
 # （pm/plugin_declarations.py: read_python_declaration 读 python_dependencies／pip_dependencies）。一律声明，不管开没开向量；版本范围和 pyproject.toml 的 vector 一致。

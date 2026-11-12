@@ -534,9 +534,9 @@ def _key_main(argv, io=None, sys_=None):
         src = KS.source_with_dotenv(env, use_path, home, sys_.env)
         rep = {"env": env, "source": src, "basis": basis,
                "global_file": dict(KS.file_report(global_path), checked=bool(reads_files and global_path)),
-               "this_bot_file": dict(KS.file_report(use_path or std_own), checked=bool(reads_files)),                 # checked 为假：这份设置不读密钥文件，这里只是照实说文件在不在（标准位置）
+               "this_bot_file": dict(KS.file_report(use_path or std_own), checked=bool(reads_files)),                 # checked：这份文件在不在密钥来源的查找范围里；实际用哪一把，看 source。checked 为假：这份设置不读密钥文件，这里只是照实说文件在不在（标准位置）
                "config_reads_key_files": reads_files, "order": "这个机器人自己的文件 → 全局文件 → 环境变量 → Hermes 的 .env（只看名字）" if reads_files else "环境变量 → Hermes 的 .env（这份设置不读密钥文件）",
-               "platform_supports_key_file": KS.supported(), "note_values": "这里只报来源，不显示密钥的值；文件那几项只看类型和权限，不代表里面的值合格。"}
+               "platform_supports_key_file": KS.supported(), "note_values": "这里只报来源，不显示密钥的值；文件那几项只看类型和权限，不代表里面的值合格；checked 表示这份文件在不在密钥来源的查找范围里，实际用哪一把，看 source。"}
         if dir_problem:
             rep["global_dir_problem"] = dir_problem
         elif reads_files:

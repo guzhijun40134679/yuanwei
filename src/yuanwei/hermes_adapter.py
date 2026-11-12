@@ -127,6 +127,7 @@ class HermesAdapter:
         self.platform = "cli"
         self._init_kw = {}
         self.ws = {"key": None, "kind": None, "label": None, "reason": "not_initialized"}
+        self.host_cwd_dropped = 0                                                           # 问 Hermes「这一轮的文件夹」时，取到了但不能用、被丢掉的值有几个（只记个数）
         self._cwd_recheck = False                                                           # 经典终端恢复会话：钩子在 Hermes 切目录之前被调，到下一轮开始再按进程目录重判一次
         self._mems, self._surfaces = {}, {}
         self._pending = {}                    # 会话 → [{token, number, fp, admitted, reason}]（还没配上 sync_turn 的轮次，先进先出）
@@ -244,13 +245,20 @@ class HermesAdapter:
         if not self.active:
             self._dump_status()
             return
-        self._set_workspace(HW.resolve(self._home or "", self._init_kw["cwd"], plat))
+        self._set_workspace(self._resolve_ws(self._init_kw["cwd"], plat))                  # 宿主没传 cwd、又是 local／tui／desktop：问 Hermes 这一轮的文件夹（桌面版，小问题 28）
         if self.win is not None:                                                             # 绑定表里有这个号→同一窗口（重启、--resume）；没有→新窗口用默认值（见交回点甲问题 4）
             try:
                 self._win_ref = self.win.bind_new(HOST, session_id, "", via="initialize")
             except Exception:                                                                # noqa: BLE001  绑定写不了：没有绑定＝窗口身份待确认，读取被拒，不默认开
                 self._win_ref = None
         self._dump_status()
+
+    def _resolve_ws(self, cwd, plat):
+        """认工作区：全走 HW.resolve。宿主没传 cwd、平台是 local／tui／desktop（本机平台去掉经典终端，网关聊天平台不问）时，resolve 会问 Hermes 这一轮的文件夹（agent.runtime_cwd / gateway.session_policy，绝不用进程目录）；
+        取到但不能用的值只记个数（host_cwd_dropped），不记内容。只在 initialize 和恢复会话的钩子里用；这一轮之外（整理用的会话、旁支和辅助会话等）按没取到处理；它们不在验证范围内，不承诺统一落入「生活」。"""
+        def _drop(n):
+            self.host_cwd_dropped += n
+        return HW.resolve(self._home or "", cwd, plat, on_drop=_drop)
 
     def shutdown(self):
         self._worker.stop()
@@ -752,12 +760,12 @@ class HermesAdapter:
 
     def _rejudge_after_move(self, kw):
         """恢复会话后的工作区（本机平台）：kwargs 里有 cwd 就用（cwd_given）；经典终端（cli）没有就取进程目录——但钩子在 Hermes 切目录之前被调，所以先不判，
-        记一笔，到下一轮开始再判（见 _recheck_workspace_after_resume）；其他本机平台没目录就是生活（no_cwd_life）。网关平台不走这里（照原来的规则：说不清）。"""
+        记一笔，到下一轮开始再判（见 _recheck_workspace_after_resume）；local／tui／desktop 没目录：先问 Hermes 这一轮的文件夹（cwd_from_host_turn），取不到才是生活（no_cwd_life）。网关平台不走这里（照原来的规则：说不清）。"""
         cwd = kw.get("cwd")
         if cwd is None and self.platform in HW.PROCESS_CWD_PLATFORMS:
             self._cwd_recheck = True
             return
-        self._adopt_workspace(HW.resolve(self._home or "", cwd, self.platform))
+        self._adopt_workspace(self._resolve_ws(cwd, self.platform))                      # 没带 cwd 的非经典终端本机平台：同样问 Hermes 这一轮的文件夹，取不到才是生活
 
     def _window_switch(self, new, parent, prev, reset, reason):
         """宿主编号换了，逻辑窗口怎么跟（对照表在交回点甲文档第 5 节）。压缩：同一窗口；分叉：复制此刻状态，之后各管各的；reset：新窗口用默认值；
@@ -819,6 +827,6 @@ class HermesAdapter:
     def status(self):
         return {"organizer_key": self._organizer_key(), "active": self.active, "inactive_reason": self.inactive_reason, "inactive_message": self._inactive_message(), "profile": dict(self.profile), "evidence": self.evidence, "owner_basis": self.owner_basis, "recorded_turns": self.recorded_turns,
                 "skipped": dict(self.skipped), "mode": self.cfg.get("mode", "tools_only"), "read_scope": self.scope, "worker_errors": list(self._worker.errors),
-                "workspace": {"key": self.ws["key"], "kind": self.ws["kind"], "reason": self.ws["reason"]},
+                "workspace": {"key": self.ws["key"], "kind": self.ws["kind"], "reason": self.ws["reason"]}, "host_cwd_dropped": self.host_cwd_dropped,
                 "window": self._window_status(), "direct_display": self._display_status(),
                 "compat": {"off": {k: v["reason"] for k, v in self._probe["features"].items() if not v["on"]}, "extra_abstract": list(self._probe["extra_abstract"])}}

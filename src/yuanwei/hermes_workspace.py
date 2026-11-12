@@ -10,10 +10,14 @@ $HERMES_HOME/projects.db 里项目的文件夹（hermes_cli/projects_db.py: proj
 
 **没给 cwd 怎么办（2026-11-11 真机试装后改，依据：Hermes agent/agent_init.py 的 _memory_provider_init_kwargs 只有 agent.session_cwd 有值才传 cwd；经典终端建 agent 时不给）：**
 本机平台（cli、local、tui、desktop）没给 cwd 时——平台是 cli：取 Hermes 进程此刻的工作目录（见 local_process_cwd，优先用 Hermes 自己的 resolve_agent_cwd），照项目的规则判；
-其他本机平台（tui、desktop、local）：记进「生活」（它们跑在另一个后台进程里，进程目录不是用户的项目目录）；取不到、是 "/"、不是绝对路径：记进「生活」。
+其他本机平台（tui、desktop、local）：先问 Hermes 这一轮的文件夹（见下一段）；宿主没给目录、后备也没取得有效目录（取不到、是 "/"、不是绝对路径）时，才记进「生活」（它们跑在另一个后台进程里，进程目录不是用户的项目目录，绝不用）。
 网关平台（手机等）没给 cwd：照旧记进「生活」。给了 cwd 的，项目判定一个字不改。
-resolve 返回的 reason：成功认出时写依据——cwd_given（宿主给了）、cwd_from_process（用 Hermes 进程的目录）、no_cwd_life（没给、也没有可信目录，记进生活）；认不出时写原因。
-注意：读取范围选「甲（每个工作区只翻自己）」时，没给工作目录的项目对话会落进「生活」，只翻得到「生活」里的话。
+**2026-11-12 补（小问题 28）：** Hermes 桌面版走网关自己的会话管理，建助手时不传 cwd（Hermes 上游 #144869），但这一轮正在进行时 Hermes 自己知道文件夹。所以宿主没传 cwd、
+平台是本机平台（local、tui、desktop，不含经典终端 cli，也不含网关聊天平台）时，先问 Hermes「这一轮的文件夹」：agent.runtime_cwd.scoped_session_cwd()，取不到再取 gateway.session_policy.active_policy().cwd（见 host_turn_cwd）；
+取到的值要能用（展开 ~、绝对路径、本机上真有这个目录，不是根目录），否则当没取到；~（家目录）也照项目表判，没有项目覆盖它时才是「生活」；**绝不用进程目录**（网关是长期运行的进程，用它会把所有项目钉成同一个）；
+import 失败、改名、抛异常都当没取到，退回「生活」，插件照常启用。取到以后照同一条规则对着 projects.db 判，依据写 cwd_from_host_turn。
+resolve 返回的 reason：成功认出时写依据——cwd_given（宿主给了）、cwd_from_process（用 Hermes 进程的目录）、cwd_from_host_turn（问 Hermes 这一轮的文件夹取到的）、no_cwd_life（没给、也没有可信目录，记进生活）；认不出时写原因。
+注意：读取范围选「甲（每个工作区只翻自己）」时，宿主没给目录、后备也没取得有效目录的项目对话会落进「生活」，只翻得到「生活」里的话。
 """
 import json
 import os
@@ -25,6 +29,7 @@ LIFE = "life"
 LOCAL_PLATFORMS = ("cli", "local", "tui", "desktop")
 LOGIN_CHECKED_PLATFORMS = ("tui", "desktop")                # 这两个平台的 agent 可能带着登录身份（agent_factory.py：user_id=auth_user_id＝宿主主人的系统账号）：带了就不自动当主人，照网关的规则要配 owners
 PROCESS_CWD_PLATFORMS = ("cli",)                           # 只有这个平台的 Hermes 进程目录就是用户的目录
+HOST_TURN_PLATFORMS = tuple(p for p in LOCAL_PLATFORMS if p not in PROCESS_CWD_PLATFORMS)   # 本机平台去掉经典终端（local、tui、desktop）：只有这些问 Hermes「这一轮的文件夹」；网关聊天平台（Telegram 等）不问
 SCOPES = ("isolated", "life_all", "all_open")
 DEFAULT_SCOPE = "life_all"      # 乙（用户定）：生活能读生活和所有项目，项目只读自己；甲 isolated＝全隔开，丙 all_open＝全打通，都是可选设置
 LABELS_FILE = os.path.join("yuanwei", "workspaces.json")
@@ -70,11 +75,75 @@ def _usable_process_cwd(raw):
     return None if n == os.sep else n                                                    # 根目录不是任何人的项目目录
 
 
-def resolve(hermes_home, cwd, platform, process_cwd=None):
-    """process_cwd：取进程目录的办法（默认 local_process_cwd；测试用来注入）。"""
+HOST_TURN_BASIS = "cwd_from_host_turn"
+
+
+def _host_turn_asks():
+    """问 Hermes「这一轮的文件夹」的两个办法，按顺序。绝不包含进程目录（os.getcwd、resolve_agent_cwd、TERMINAL_CWD 都不许碰）。"""
+    import importlib
+
+    def scoped():
+        return importlib.import_module("agent.runtime_cwd").scoped_session_cwd()
+
+    def policy():
+        p = importlib.import_module("gateway.session_policy").active_policy()
+        return None if p is None else getattr(p, "cwd", None)
+    return (scoped, policy)
+
+
+def _usable_host_cwd(raw):
+    """取到的值能不能用：字符串、展开 ~ 后是绝对路径、本机上真有这个目录、不是根目录。返回规整后的路径；不能用返回 None。"""
+    if not isinstance(raw, str):
+        return None
+    try:
+        p = os.path.expanduser(raw.strip())
+        if not os.path.isabs(p):
+            return None
+        n = os.path.normpath(p)
+        if n == os.sep or not os.path.isdir(n):
+            return None
+        return n
+    except Exception:                                                                    # noqa: BLE001
+        return None
+
+
+def host_turn_cwd():
+    """问 Hermes 这一轮的文件夹。返回 (路径或 None, 被丢掉的值有几个)。「被丢掉」＝取到了非空的值但不能用（相对路径、本机没有这个目录、根目录、不是字符串）；
+    没取到（空、None、import 失败、函数改名、抛异常）不算丢掉，只是没取到。一个都没取到就是 (None, 丢掉数)。不在 Hermes 的这一轮里（经典终端、整理用的会话、测试）取不到，属正常。"""
+    dropped = 0
+    try:
+        asks = _host_turn_asks()
+    except Exception:                                                                    # noqa: BLE001
+        return None, 0
+    for ask in asks:
+        try:
+            raw = ask()
+        except Exception:                                                                # noqa: BLE001  import 失败、函数改名、抛异常：当没取到
+            continue
+        if raw is None or (isinstance(raw, str) and not raw.strip()):
+            continue
+        usable = _usable_host_cwd(raw)
+        if usable is not None:
+            return usable, dropped
+        dropped += 1
+    return None, dropped
+
+
+def resolve(hermes_home, cwd, platform, process_cwd=None, host_cwd=None, on_drop=None):
+    """process_cwd：取进程目录的办法（默认 local_process_cwd；测试用来注入）。
+    host_cwd：问 Hermes 这一轮的文件夹的办法（默认 host_turn_cwd，返回 (路径或 None, 丢掉数)；测试用来注入）。on_drop(n)：有值被丢掉时调一下（给状态计数用）。"""
     plat = platform or "cli"
     if cwd is not None:
         return _resolve_with_cwd(hermes_home, cwd, "cwd_given")                                       # 给了 cwd：判定照旧，只是成功时写上依据
+    if plat in HOST_TURN_PLATFORMS:                                                                   # 没给、是本机平台而又不是经典终端（local、tui、desktop）：问 Hermes 这一轮的文件夹（只在这里问；出任何错都当没取到）；网关聊天平台不问
+        try:
+            got, dropped = (host_cwd or host_turn_cwd)()
+            if dropped and on_drop is not None:
+                on_drop(int(dropped))
+        except Exception:                                                                # noqa: BLE001
+            got = None
+        if isinstance(got, str) and got:
+            return _resolve_with_cwd(hermes_home, got, HOST_TURN_BASIS)
     if plat in PROCESS_CWD_PLATFORMS:
         raw = (process_cwd or local_process_cwd)()
         usable = _usable_process_cwd(raw)

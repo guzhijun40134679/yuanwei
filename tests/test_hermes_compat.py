@@ -116,6 +116,14 @@ def host_owner_subject() -> str:
 RUNTIME_CWD = '''
 def resolve_agent_cwd():
     return _resolve_configured_cwd(override_is_final=False) or Path(os.getcwd())
+
+def scoped_session_cwd() -> str:
+    value = _SESSION_CWD.get()
+    return "" if value is _UNSET else str(value).strip()
+'''
+SESSION_POLICY = '''
+def active_policy():
+    return _ACTIVE_POLICY.get()
 '''
 LAUNCHERS = '''
 def print_runtime_command(repo_root, argv):
@@ -183,7 +191,7 @@ def enabled_member_dirs():
             members.append(path)
     return members
 '''
-FILES = {"pm/plugin_declarations.py": PM_DECLARATIONS, "pm/plugins_state.py": PM_PLUGINS_STATE, "pm/workspace.py": PM_WORKSPACE, "gateway/session_hosted_rpc.py": SESSION_HOSTED_RPC, "agent/turn_author.py": TURN_AUTHOR, "gateway/owner_identity.py": OWNER_IDENTITY, "agent/runtime_cwd.py": RUNTIME_CWD, "hermes_cli/_launchers.py": LAUNCHERS, "agent/memory_manager.py": MEMORY_MANAGER, "agent/agent_init.py": AGENT_INIT, "hermes_cli/projects_db.py": PROJECTS_DB, "agent/memory_provider.py": BASE, "agent/turn_context.py": TURN_CONTEXT, "run_agent.py": RUN_AGENT, "agent/message_metadata.py": METADATA,
+FILES = {"pm/plugin_declarations.py": PM_DECLARATIONS, "pm/plugins_state.py": PM_PLUGINS_STATE, "pm/workspace.py": PM_WORKSPACE, "gateway/session_hosted_rpc.py": SESSION_HOSTED_RPC, "agent/turn_author.py": TURN_AUTHOR, "gateway/owner_identity.py": OWNER_IDENTITY, "agent/runtime_cwd.py": RUNTIME_CWD, "gateway/session_policy.py": SESSION_POLICY, "hermes_cli/_launchers.py": LAUNCHERS, "agent/memory_manager.py": MEMORY_MANAGER, "agent/agent_init.py": AGENT_INIT, "hermes_cli/projects_db.py": PROJECTS_DB, "agent/memory_provider.py": BASE, "agent/turn_context.py": TURN_CONTEXT, "run_agent.py": RUN_AGENT, "agent/message_metadata.py": METADATA,
          "agent/context_compressor.py": COMPRESSOR, "plugins/plugin_loader.py": LOADER, "plugins/memory/__init__.py": MEMORY_PLUGINS,
          "hermes_cli/memory_setup.py": MEMORY_SETUP, "hermes_cli/config_defaults.py": DEFAULTS}
 
@@ -244,6 +252,8 @@ def test_baseline_synthetic_host_everything_ok_and_each_check_names_its_features
     ({"gateway/owner_identity.py": ("def host_owner_subject()", "def somebody_else()")}, "owner_identity", "login_owner"),
     ({"gateway/owner_identity.py": None}, "owner_identity", "login_owner"),
     ({"agent/runtime_cwd.py": ("def resolve_agent_cwd()", "def resolve_other_cwd()")}, "runtime_cwd", "workspace"),
+    ({"agent/runtime_cwd.py": ("def scoped_session_cwd()", "def scoped_cwd_renamed()"), "gateway/session_policy.py": ("def active_policy()", "def current_policy()")}, "host_turn_cwd", "workspace"),   # 两个都没了才变
+    ({"agent/runtime_cwd.py": ("def scoped_session_cwd()", "def scoped_cwd_renamed()"), "gateway/session_policy.py": None}, "host_turn_cwd", "workspace"),
     ({"hermes_cli/_launchers.py": ('"--print-runtime-command"', '"--print-something"')}, "runtime_python", "numpy_install"),
     ({"hermes_cli/_launchers.py": ('parser.add_argument("--module", default="hermes_cli.main")', "pass")}, "runtime_python", "numpy_install"),
     ({"agent/memory_manager.py": ("schemas = list(provider.get_tool_schemas())", "schemas = []")}, "tool_schemas_at_registration", "tools"),
@@ -332,10 +342,10 @@ def test_real_local_hermes_has_no_missing_dependency():
 
 
 @pytest.mark.skipif(not os.path.isdir(REAL), reason="没有本机 Hermes 源码")
-@pytest.mark.parametrize("rev,changed", [("935c1e8962d43de3ef0adde30e80dda55d0247db", {"base_sync_turn", "host_turn_start_kwargs", "host_sync_kwargs", "config_format", "init_kwargs", "owner_identity", "runtime_python", "group_room_platform", "bot_author_tag", "plugin_python_deps"}),
+@pytest.mark.parametrize("rev,changed", [("935c1e8962d43de3ef0adde30e80dda55d0247db", {"base_sync_turn", "host_turn_start_kwargs", "host_sync_kwargs", "config_format", "init_kwargs", "owner_identity", "host_turn_cwd", "runtime_python", "group_room_platform", "bot_author_tag", "plugin_python_deps"}),
                                          ("0e427d788d", {"owner_identity", "group_room_platform", "plugin_python_deps"}), ("2bd378ed1b", set())])
 def test_pinned_revisions_read_through_git_match_the_compat_table(rev, changed):
-    """兼容表第 9 节的三版对照：Dolphin 钉的 935c1e89 比后两版老——sync_turn 没有 turn_author、宿主不传作者字段、设置格式 40；v0.22.0 只缺 gateway.owner_identity（那时还没有登录身份比较），现在这一版十九项全对（v0.22.0 另外没有群聊的 session_hosted_rpc.py、插件依赖声明的成员选择那一段还是老写法）。"""
+    """兼容表第 9 节的三版对照：Dolphin 钉的 935c1e89 比后两版老——sync_turn 没有 turn_author、宿主不传作者字段、设置格式 40；v0.22.0 缺 gateway.owner_identity（那时还没有登录身份比较）；host_turn_cwd 在 v0.22.0 上只有 scoped_session_cwd 一个来源，后备照常可用，按「任意一个就算 ok」不报变了；935c1e89 两个都没有，报变了。现在这一版二十项全对（v0.22.0 另外没有群聊的 session_hosted_rpc.py、插件依赖声明的成员选择那一段还是老写法）。"""
     if subprocess.run(["git", "-C", REAL, "cat-file", "-e", rev], capture_output=True).returncode != 0:
         pytest.skip("本机 git 里没有这个提交")
     r = HC.doctor_from_reader(git_reader(rev))
@@ -353,6 +363,32 @@ def test_cli_doctor_prints_json_and_exit_code(tmp_path, capsys):
     assert rc == 1 and out["summary"]["changed"] == 1
     rc = cli.main(["doctor", "hermes", "--hermes-dir", str(tmp_path / "nowhere")])
     assert rc == 2 and json.loads(capsys.readouterr().out)["error"] == "hermes_dir_not_found"
+
+
+def test_host_turn_cwd_any_one_source_is_ok_and_says_which_is_there(tmp_path):
+    """至少有一个来源的接口还在：只有一个在 → ok，说明里照实列哪个在、哪个不在；基线两个都在 → ok。"""
+    def chk(path, **edit):
+        r = HC.doctor(host(path, **edit))
+        return next(x for x in r["checks"] if x["id"] == "host_turn_cwd"), r
+    both, _ = chk(tmp_path / "a")
+    assert both["status"] == "ok" and "scoped_session_cwd" in both["detail"] and "active_policy" in both["detail"] and "只有" not in both["detail"]
+    only_scoped, r1 = chk(tmp_path / "b", **{"gateway/session_policy.py": None})
+    assert only_scoped["status"] == "ok" and only_scoped["detail"].startswith("只有 agent.runtime_cwd.scoped_session_cwd") and "至少还有一个候选接口在" in only_scoped["detail"] and "active_policy" in only_scoped["detail"]
+    assert r1["exit_code"] == 0 and "workspace" not in r1["affected_features"]
+    only_policy, r2 = chk(tmp_path / "c", **{"agent/runtime_cwd.py": ("def scoped_session_cwd()", "def scoped_cwd_renamed()")})
+    assert only_policy["status"] == "ok" and only_policy["detail"].startswith("只有 gateway.session_policy.active_policy") and "至少还有一个候选接口在" in only_policy["detail"] and "scoped_session_cwd" in only_policy["detail"]
+    assert r2["exit_code"] == 0
+
+
+def test_host_turn_cwd_both_gone_says_desktop_falls_back_to_life_and_is_not_fatal(tmp_path):
+    """两个函数都没了：doctor 报「变了」并说「桌面版会退回记进生活」，但不算读不到（missing）、不算出错（退出码 2）。"""
+    for edit in ({"gateway/session_policy.py": None, "agent/runtime_cwd.py": ("def scoped_session_cwd()", "def scoped_cwd_renamed()")},
+                 {"gateway/session_policy.py": ("def active_policy()", "def other()"), "agent/runtime_cwd.py": None}):
+        r = HC.doctor(host(tmp_path / str(len(edit)) / str(id(edit)), **edit))
+        c = next(x for x in r["checks"] if x["id"] == "host_turn_cwd")
+        assert c["status"] == "changed" and "桌面版会退回记进「生活」" in c["detail"] and "桌面版会退回记进「生活」" in c["if_changed"]
+        assert "scoped_session_cwd" in c["detail"] and "active_policy" in c["detail"]
+        assert "missing" not in status(r).values() and r["exit_code"] == 1 and "workspace" in r["affected_features"]
 
 
 def test_every_dependency_id_appears_in_the_compat_table():
