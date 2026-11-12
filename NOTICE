@@ -1,0 +1,42 @@
+原委（yuanwei）第三方声明
+
+一、切句有 Tencent MemoryCore 的分叉渊源（MIT）。研究里的切句（锚点切法）按本地 MemoryCore 的 splitSentences 的正则、trim 和短句行为重写，位置另算。以下是随源的许可全文：
+
+Tencent is pleased to support the open source community by making TencentDB Agent Memory available. 
+
+Copyright (C) 2026 Tencent.  All rights reserved. 
+
+TencentDB Agent Memory is licensed under the MIT.
+
+
+Terms of the MIT:
+--------------------------------------------------------------------
+Permission is hereby granted, free of charge, to any person obtaining
+a copy of this software and associated documentation files (the
+"Software"), to deal in the Software without restriction, including
+without limitation the rights to use, copy, modify, merge, publish,
+distribute, sublicense, and/or sell copies of the Software, and to
+permit persons to whom the Software is furnished to do so, subject to
+the following conditions:
+
+The above copyright notice and this permission notice shall be
+included in all copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
+EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
+MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.
+IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY
+CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT,
+TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE
+SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+----------------------------------------------------------------
+
+二、NumPy（选装，pip install yuanwei[vector]）：BSD-3-Clause。随包不分发 NumPy 本身；用户自己安装时，请保留它自带的版权、条款、免责声明及不得借名背书的要求；
+如果分发平台 wheel／捆绑二进制，还应保留该构建所附 BLAS、编译器运行库等各自的许可。
+
+三、基础包只用 Python 标准库（含 sqlite3）。向量服务、重排服务可以由用户自备（Ollama、LM Studio 等，不随包分发）；也可以选「自带向量引擎」（见下一条）。
+
+四、自带向量引擎（用户选了「自带」、并明确同意以后才下载；原委不随包分发下面两样东西，只从官方发布地址下载，核对钉住的校验码以后使用）：
+  1. llama.cpp 的服务程序 llama-server：MIT 许可，版权归 llama.cpp 作者们（The ggml authors）所有；许可全文随它的发布包附带，下载后保存在引擎目录的 bin/ 里。
+  2. Qwen3-Embedding-0.6B 的 GGUF 模型文件：Apache-2.0 许可，版权归 Alibaba Cloud（通义千问团队）所有；许可全文见模型的官方发布页。
+  原委只是把它们当作外部程序和数据文件来运行，不修改它们。

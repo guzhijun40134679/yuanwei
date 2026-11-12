@@ -1,0 +1,37 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "yuanwei"
+version = "0.1.0a1"
+description = "原委：事有原委，话有出处。给 AI 助手用的长期记忆（预览版）"
+requires-python = ">=3.11"
+dependencies = []
+readme = "README.md"
+license = "LicenseRef-PolyForm-Noncommercial-1.0.0"
+license-files = ["LICENSE", "NOTICE"]
+authors = [{ name = "Junzhi Gu (顾钧之)" }]
+
+[project.urls]
+Homepage = "https://github.com/guzhijun40134679/yuanwei"
+Source = "https://github.com/guzhijun40134679/yuanwei"
+Issues = "https://github.com/guzhijun40134679/yuanwei/issues"
+
+[project.optional-dependencies]
+vector = ["numpy>=1.26"]
+mcp = ["mcp>=1.28.1,<2"]          # 官方 Python SDK（MIT）；基础包不依赖它，只有 python -m yuanwei.mcp 要用
+test = ["pytest>=8"]
+
+[project.scripts]
+yuanwei = "yuanwei.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+yuanwei = ["resources/*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]

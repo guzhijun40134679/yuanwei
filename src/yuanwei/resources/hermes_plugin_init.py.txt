@@ -1,0 +1,179 @@
+"""原委（yuanwei）记忆插件。由 `yuanwei setup hermes` 装到 $HERMES_HOME/plugins/yuanwei/；卸载用 `yuanwei uninstall hermes`。
+核心在 yuanwei.hermes_adapter，这里只把 Hermes 的 MemoryProvider 接口转过去；设置读 $HERMES_HOME/yuanwei/config.json（装接头时写的，不含密钥）。
+这个文件的指纹记在 $HERMES_HOME/yuanwei/install.json 里：你改过它，卸载就不会删它。"""
+import abc
+import json
+import os
+import sys
+
+# 这个文件顶层唯一 import 的 Hermes 模块：Hermes 公开的记忆插件基类。
+# 适配器（yuanwei.hermes_adapter、hermes_workspace）另外会在用到时懒导入两处 Hermes 内部模块：gateway.owner_identity（host_owner_subject，核对 tui／desktop 的登录身份）
+# 和 agent.runtime_cwd（resolve_agent_cwd，经典终端没给工作目录时取目录）；导入或调用失败就退回保守做法（不当主人／用进程目录）。另外向导会跑 `hermes --print-runtime-command` 找 Hermes 的 Python 环境。
+# 这几处都在 yuanwei doctor hermes 的清单里（hermes_compat.DEPENDENCIES）。
+from agent.memory_provider import MemoryProvider
+
+_KNOWN_ABSTRACT = frozenset(["name", "is_available", "initialize", "get_tool_schemas"])
+COMPAT = {"extra_abstract": []}
+
+
+def _home(kwargs=None):
+    h = (kwargs or {}).get("hermes_home")
+    if h:
+        return str(h)
+    return os.environ.get("HERMES_HOME") or os.path.expanduser("~/.hermes")
+
+
+def _read_config(home):
+    try:
+        with open(os.path.join(home, "yuanwei", "config.json"), encoding="utf-8") as f:
+            cfg = json.load(f)
+        return cfg if isinstance(cfg, dict) else None
+    except Exception:
+        return None
+
+
+class YuanweiMemoryProvider(MemoryProvider):
+    def __init__(self):
+        self._a = None
+        self._why = ""
+        self._init_error = None
+        self._hook_registered = False
+        self._schema_error = None
+
+    @property
+    def name(self):
+        return "yuanwei"
+
+    def is_available(self):
+        cfg = _read_config(_home())
+        if not cfg or not cfg.get("db"):
+            self._why = "没有找到原委的设置文件（先运行 yuanwei setup hermes）"
+            return False
+        sp = cfg.get("src_path")
+        if sp and not os.path.isdir(sp):
+            self._why = "原委的程序目录不在了：%s" % sp
+            return False
+        return True
+
+    def unavailable_reason(self):
+        return self._why
+
+    def initialize(self, session_id, **kwargs):
+        self._a, self._init_error = None, None
+        try:
+            cfg = _read_config(_home(kwargs))
+            if not cfg:
+                self._init_error = "no_config"
+                return
+            sp = cfg.get("src_path")
+            if sp and sp not in sys.path:
+                sys.path.insert(0, sp)
+            from yuanwei.hermes_adapter import HermesAdapter
+            cfg = dict(cfg, _loaded_from=_home(kwargs))                 # 这份设置是从哪个家目录读到的（宿主没给 hermes_home 时，适配器拿它核对「是不是这个家目录自己的设置」）
+            a = HermesAdapter(cfg, host_base=MemoryProvider)           # 按基类的真实形状探测功能，不按版本号
+            a.hook_registered = bool(self._hook_registered)
+            a.initialize(session_id, **kwargs)
+            self._a = a
+        except Exception as e:                                          # noqa: BLE001  对不上、打不开：这个插件关掉、原因记下，Hermes 照常起，不往外抛
+            self._a, self._init_error = None, "%s: %s" % (type(e).__name__, str(e)[:120])
+
+    def status(self):
+        if self._a:
+            return self._a.status()
+        return {"active": False, "init_error": getattr(self, "_init_error", None) or "not_initialized", "tool_schema_error": self._schema_error}
+
+    def system_prompt_block(self, **kwargs):
+        return self._a.system_prompt_block() if self._a else ""
+
+    def prefetch(self, query, *, session_id="", **kwargs):
+        return self._a.prefetch(query, session_id=session_id) if self._a else ""
+
+    def queue_prefetch(self, query, *, session_id="", **kwargs):
+        return None
+
+    def recall_status(self, **kwargs):
+        return None
+
+    def sync_turn(self, user_content, assistant_content, *, session_id="", messages=None, turn_author=None, **kwargs):
+        if self._a:
+            self._a.sync_turn(user_content, assistant_content, session_id=session_id, messages=messages, turn_author=turn_author)
+
+    def get_tool_schemas(self, **kwargs):
+        if self._a:
+            return self._a.get_tool_schemas()
+        if self._init_error:
+            return []                                                   # initialize 试过、起不来：这一项关掉，不把工具交给模型
+        return self._static_tool_schemas()                              # initialize 之前：Hermes 在 add_provider 里就要工具清单、并把名字记进路由表，不再刷新；交空清单就会 Unknown tool
+
+    def _static_tool_schemas(self):
+        """原委工具的固定清单（和初始化以后适配器交的一致）。读 config.json 的 src_path 导入原委里静态的定义；做不到才交空清单，原因记在 _schema_error（status 里看得到）。"""
+        try:
+            cfg = _read_config(_home()) or {}
+            sp = cfg.get("src_path")
+            if sp and sp not in sys.path:
+                sys.path.insert(0, sp)
+            from yuanwei.hermes_adapter import static_tool_schemas
+            out = static_tool_schemas()
+            self._schema_error = None
+            return out
+        except Exception as e:                                          # noqa: BLE001
+            self._schema_error = "%s: %s" % (type(e).__name__, str(e)[:120])
+            return []
+
+    def handle_tool_call(self, tool_name, args, **kwargs):
+        if not self._a:
+            return json.dumps({"status": "error", "reason": "not_initialized", "text": "原委没有初始化。"}, ensure_ascii=False)
+        return self._a.handle_tool_call(tool_name, args, **kwargs)
+
+    def shutdown(self, **kwargs):
+        if self._a:
+            self._a.shutdown()
+
+    def on_turn_start(self, turn_number, message, **kwargs):
+        if self._a:
+            self._a.on_turn_start(turn_number, message, **kwargs)
+
+    def on_session_end(self, messages, **kwargs):
+        if self._a:
+            self._a.on_session_end(messages)
+
+    def on_session_switch(self, new_session_id, *, parent_session_id="", reset=False, rewound=False, **kwargs):
+        if self._a:
+            self._a.on_session_switch(new_session_id, parent_session_id=parent_session_id, reset=reset, rewound=rewound, **kwargs)
+
+    def on_pre_compress(self, messages, **kwargs):
+        return ""
+
+    def display_hook(self, **kwargs):
+        """transform_llm_output 钩子（可选，直接显示用）：宿主调它，我们把程序给的固定提示接在这一轮助手回复后面；没有要显示的就返回 None（不改回复）。"""
+        try:
+            return self._a.display_hook(**kwargs) if self._a else None
+        except Exception:                                               # noqa: BLE001  显示出任何错都不能影响回复
+            return None
+
+
+def _stub(name):
+    def method(self, *args, **kwargs):
+        return None
+    method.__name__ = name
+    return method
+
+
+# 宿主以后要是多加了必须实现的方法，给它补一个空实现：Hermes 还能加载我们，这个方法名记进 COMPAT（状态里会看到）
+for _n in sorted(set(getattr(MemoryProvider, "__abstractmethods__", ())) - _KNOWN_ABSTRACT):
+    setattr(YuanweiMemoryProvider, _n, _stub(_n))
+    COMPAT["extra_abstract"].append(_n)
+if COMPAT["extra_abstract"]:
+    abc.update_abstractmethods(YuanweiMemoryProvider)
+
+
+def register(ctx):
+    p = YuanweiMemoryProvider()
+    ctx.register_memory_provider(p)                                     # 每次加载给一个新实例（Hermes 一个进程里可能有好几个 profile，各自一个实例）
+    try:                                                                # 可选：有 register_hook 就注册直接显示用的钩子；加载器是不是真的转过去，要等宿主真的调过它才知道（status 里写明）
+        reg = getattr(ctx, "register_hook", None)
+        if callable(reg):
+            reg("transform_llm_output", p.display_hook)
+            p._hook_registered = True
+    except Exception:                                                   # noqa: BLE001
+        pass

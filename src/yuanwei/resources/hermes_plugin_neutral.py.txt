@@ -1,0 +1,25 @@
+"""原委（yuanwei）记忆插件的空壳：`yuanwei uninstall hermes` 第一步换上它。什么都不做、不读不写，只让还没重启的 Hermes 找得到一个合格但不可用的提供者，不报错。
+确认 Hermes 已经重新加载以后，卸载的第三步会把这个文件和插件目录删掉。"""
+from agent.memory_provider import MemoryProvider
+
+
+class YuanweiMemoryProvider(MemoryProvider):
+    @property
+    def name(self):
+        return "yuanwei"
+
+    def is_available(self):
+        return False
+
+    def unavailable_reason(self):
+        return "原委已卸载（空壳）"
+
+    def initialize(self, session_id, **kwargs):
+        return None
+
+    def get_tool_schemas(self):
+        return []
+
+
+def register(ctx):
+    ctx.register_memory_provider(YuanweiMemoryProvider())
