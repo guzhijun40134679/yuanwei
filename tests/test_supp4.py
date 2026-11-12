@@ -315,7 +315,7 @@ def test_readme_matches_the_current_state():
     t = open(os.path.join(root, "README.zh-CN.md"), encoding="utf-8").read()                 # 11-12 起中文说明在 README.zh-CN.md，README.md 是英文
     en = open(os.path.join(root, "README.md"), encoding="utf-8").read()
     assert "Every memory has its origin; every quote has its source." in en and "open source" not in en.lower() and "open-source" not in en.lower()
-    assert "(README.zh-CN.md)" in en and "(README.md)" in t and "Chinese only" in en
+    assert "(https://github.com/guzhijun40134679/yuanwei/blob/main/README.zh-CN.md)" in en and "(https://github.com/guzhijun40134679/yuanwei/blob/main/README.md)" in t and "Chinese only" in en   # 完整网址：PyPI 页面上相对链接打不开
     assert "回答前先查" not in t and "没有便条" not in t
     assert "交回点" not in t and "还没做" not in t and "开源" not in t          # 11-11 文档改准：README 给用户看，不留开发过程的说法，不称开源
     assert "事有原委，话有出处" in t

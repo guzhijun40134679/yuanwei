@@ -1,6 +1,6 @@
 # Yuanwei (原委)
 
-English | [简体中文](README.zh-CN.md)
+English | [简体中文](https://github.com/guzhijun40134679/yuanwei/blob/main/README.zh-CN.md)
 
 **Every memory has its origin; every quote has its source.** Long-term memory for AI assistants.
 

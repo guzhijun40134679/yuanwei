@@ -1,6 +1,6 @@
 # 原委 Yuanwei
 
-[English](README.md) | 简体中文
+[English](https://github.com/guzhijun40134679/yuanwei/blob/main/README.md) | 简体中文
 
 **事有原委，话有出处。** 给 AI 助手的长期记忆。
 
