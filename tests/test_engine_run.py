@@ -675,7 +675,7 @@ def test_no_user_facing_text_teaches_xattr_and_no_shell_or_xattr_write_in_the_so
     import glob
     root = os.path.join(os.path.dirname(__file__), "..")
     texts = []
-    for f in glob.glob(os.path.join(root, "src", "yuanwei", "*.py")) + glob.glob(os.path.join(root, "docs", "*.md")) + [os.path.join(root, "README.md")]:
+    for f in glob.glob(os.path.join(root, "src", "yuanwei", "*.py")) + glob.glob(os.path.join(root, "docs", "*.md")) + [os.path.join(root, "README.md"), os.path.join(root, "README.zh-CN.md")]:
         texts.append((f, open(f, encoding="utf-8").read()))
     for f, t in texts:
         if os.path.basename(f) in ("enginerun.py",):

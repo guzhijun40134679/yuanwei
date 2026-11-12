@@ -198,7 +198,7 @@ def test_product_rules_table_hybrid_paragraph_rewritten_no_stale_all_vectors_req
 
 
 def test_n1_docs_no_longer_say_never_installed_on_a_real_hermes_and_do_not_overclaim():
-    readme = open(os.path.join(DOCS, "..", "README.md"), encoding="utf-8").read()
+    readme = open(os.path.join(DOCS, "..", "README.zh-CN.md"), encoding="utf-8").read()
     guide = read_doc("装到Hermes上.md")
     for t in (readme, guide):
         assert "2026-11-11 在 Hermes v0.22.0（+10397）上试装过，记录里列的各项都过了；没覆盖到的写在" in t

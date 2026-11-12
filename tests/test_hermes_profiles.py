@@ -475,7 +475,7 @@ def test_installed_plugin_file_refuses_to_run_on_a_copied_config_and_touches_no_
 def test_docs_say_each_bot_has_its_own_library_needs_its_own_install_and_group_chat_is_not_recorded():
     root = os.path.join(os.path.dirname(__file__), "..")
     guide = open(os.path.join(root, "docs", "装到Hermes上.md"), encoding="utf-8").read()
-    readme = open(os.path.join(root, "README.md"), encoding="utf-8").read()
+    readme = open(os.path.join(root, "README.zh-CN.md"), encoding="utf-8").read()
     rules = open(os.path.join(root, "docs", "产品规则表.md"), encoding="utf-8").read()
     for t in (guide, readme):
         assert "新建的机器人要单独装一次" in t or "新建的机器人要单独装" in t or "Hermes 里新建的机器人要单独装一次" in t

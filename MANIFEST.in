@@ -1,1 +1,2 @@
 prune tests
+include README.zh-CN.md

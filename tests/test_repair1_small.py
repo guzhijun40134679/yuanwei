@@ -18,6 +18,7 @@ BASE = ["--config-method", "yaml", "--src-path", "/x/src"]
 NEW_KEY = "sk-NEWKEY9999999999zzzzzzXYZ"
 DOCS = os.path.join(os.path.dirname(__file__), "..", "docs")
 README = os.path.join(os.path.dirname(__file__), "..", "README.md")
+README_ZH = os.path.join(os.path.dirname(__file__), "..", "README.zh-CN.md")
 
 
 def _light(h, sysx=None):
@@ -150,7 +151,7 @@ def test_top_level_help_lists_the_user_commands_and_does_not_ask_for_db_and_work
 
 
 # ---------------------------------------------------------------- 10 文档：python3 -m pip、先建环境、完整路径
-@pytest.mark.parametrize("path", [README, os.path.join(DOCS, "装到Hermes上.md")])
+@pytest.mark.parametrize("path", [README, README_ZH, os.path.join(DOCS, "装到Hermes上.md")])
 def test_install_docs_use_python3_m_pip_a_venv_under_dot_yuanwei_and_full_paths(path):
     t = open(path, encoding="utf-8").read()
     assert "python3 -m venv ~/.yuanwei/venv" in t and "~/.yuanwei/venv/bin/pip install" in t

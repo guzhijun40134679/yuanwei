@@ -175,12 +175,13 @@ def read(p):
 
 
 def test_docs_say_the_builtin_engine_is_checked_but_not_strong_and_only_lm_studio_is_tested():
-    for p in ("README.md", "docs/装到Hermes上.md", "docs/产品规则表.md"):
+    for p in ("README.zh-CN.md", "docs/装到Hermes上.md", "docs/产品规则表.md"):
         t = read(p)
         assert "没过我们自己定的严格标准" in t or "没过严格标准" in t, p
-    for p in ("README.md", "docs/装到Hermes上.md", "docs/产品规则表.md", "docs/让助手来装.md"):
+    for p in ("README.md", "README.zh-CN.md", "docs/装到Hermes上.md", "docs/产品规则表.md", "docs/让助手来装.md"):
         assert "强档" not in read(p), p                                                                 # 给用户看的文字里不再有「强档」，一律「严格标准」
     t = read("docs/装到Hermes上.md")
     assert "11,588" in t and "0.9977" in t and "测过的只有 LM Studio" in t
-    assert "测过的只有 LM Studio" in read("README.md") and "测过的只有 LM Studio" in read("docs/装到Hermes上.md")
-    assert "整理测过；向量：LM Studio 是测过的那一套" in read("docs/装到Hermes上.md") and "向量：LM Studio 是测过的那一套" in read("README.md")
+    assert "Only LM Studio is tested" in read("README.md") and "did not pass our own strict standard" in read("README.md")
+    assert "测过的只有 LM Studio" in read("README.zh-CN.md") and "测过的只有 LM Studio" in read("docs/装到Hermes上.md")
+    assert "整理测过；向量：LM Studio 是测过的那一套" in read("docs/装到Hermes上.md") and "向量：LM Studio 是测过的那一套" in read("README.zh-CN.md")

@@ -1,39 +1,43 @@
-# 原委 Yuanwei
+# Yuanwei (原委)
 
-**事有原委，话有出处。** 给 AI 助手的长期记忆。
+English | [简体中文](README.zh-CN.md)
 
-> 预览版 · 研究原型，部分功能还在开发和测试中。2026-11-11 在 Hermes v0.22.0（+10397）上试装过，记录里列的各项都过了；没覆盖到的写在限制里。
+**Every memory has its origin; every quote has its source.** Long-term memory for AI assistants.
 
-## 它做什么
+> Preview release · research prototype; some features are still being developed and tested. On 2026-11-11 it was installed on Hermes v0.22.0 (+10397) and every item on that checklist passed; what the checklist did not cover is listed under the limits below.
 
-- **原话原样存。** 你和助手说过的话原样存下，记着是谁说的、哪天说的。不改写，不总结。
-- **按事归好。** 写入时只做一件小事：把每句话挂到哪件事、哪一回，加一句摘要。同一件事的话归在一起，同类不同次的分开。
-- **翻原话回答。** 助手要用到以前的事，先查原话，同一件事的先查，每句带日期交给助手，由助手对着日期理清新旧。
+> **Language:** the setup wizard, the command-line messages and the detailed guides in `docs/` are currently in Chinese only.
 
-底子是检索原话（也就是常说的 RAG：关键词，加上可选的本机向量），上面加了一层很轻的按事整理。整理只用来帮着找，交给助手的始终是原话。
+## What it does
 
-## 为什么存原话
+- **Keeps your words verbatim.** What you and your assistant said is stored exactly as it was said, with who said it and on which day. Nothing is rewritten or summarized.
+- **Files them by event.** On write it does one small thing: it attaches each message to an event and to one episode of that event, plus a one-line summary. Messages about the same event stay together; similar events on different occasions stay apart.
+- **Answers from the original words.** When the assistant needs something from the past, it searches the original messages, the same event first, and receives each one with its date, so it can work out what is newer and what is outdated.
 
-很多记忆产品的做法，是把对话总结成摘要，或者抽成几条事实再存。我们反过来：原话原样存，整理只当目录。
+Underneath, it is retrieval over the original messages (what is usually called RAG: keywords, plus optional local vectors), with a very light layer of event filing on top. The filing only helps with finding things; what the assistant receives is always the original words.
 
-- **总结一错，后面就跟着错**，还查不出是哪句话说的。原话带着日期，对不对你自己能核。
-- **公开研究里也有类似的发现。** LongMemEval 的论文比较过：用摘要或抽出来的事实去代替原话交给模型，答对率会降，跨会话汇总的题是例外；反过来，把抽出来的事实只用来帮着检索、交出去的仍是原话，召回和答对率都提高了。
-- **检索原话这条路还远没挖到头。** 我们自己的测试里，原话检索加一层轻整理，和 Mem0 打平；但每道题真正需要的原话一般只有两三句，我们交给模型的却有几百句。怎么找得更全、交得更准，是接下来要做的。
+## Why keep the original words
 
-## 支持哪些助手
+Many memory products summarize conversations, or extract a handful of facts, and store those. We do the opposite: the original words are kept as they are, and the filing is only an index.
 
-| 助手 | 状态 |
+- **When a summary is wrong, everything built on it is wrong too**, and you can't tell which message it came from. Original words carry their dates, so you can check them yourself.
+- **Public research points the same way.** The LongMemEval paper compared the two: giving the model summaries or extracted facts instead of the original messages lowers accuracy, except on questions that aggregate across sessions; using extracted facts only to help retrieval, while still handing over the original messages, improved both recall and accuracy.
+- **Retrieval over original words is far from exhausted.** In our own tests, original-message retrieval plus light filing tied with Mem0. But a question usually needs only two or three original messages, while we hand the model several hundred. Finding them more completely and handing them over more precisely is what comes next.
+
+## Supported assistants
+
+| Assistant | Status |
 |---|---|
-| Hermes | 预览版可用（装成 Hermes 的外接记忆插件） |
-| Claude Code、Codex、Pi | 后续更新 |
+| Hermes | Available in the preview (installed as Hermes's external memory plugin) |
+| Claude Code, Codex, Pi | Coming in later updates |
 
-**系统：目前只在 Mac 上测过**（M 系列芯片的 macOS）。Windows、Linux 没测过。Windows 上已知可能出问题：同时写库时的文件锁不起作用、命令行输出可能乱码或报错、整理时可能闪出黑色窗口；要等用真的 Windows 电脑测过再修。向导在 Mac 以外的系统上会先提醒一句。
+**Platform: tested on Mac only** (macOS on Apple M-series chips). Windows and Linux are untested. Known possible problems on Windows: the file lock for concurrent writes does not work, command-line output may be garbled or fail, and a black console window may flash while organizing. These will be fixed once it has been tested on a real Windows machine. On systems other than macOS, the wizard says so first.
 
-## 安装
+## Install
 
-需要 Python 3.11 以上，以及已经装好的 Hermes。
+Requires Python 3.11 or later and an existing Hermes install.
 
-推荐先给原委单独建一个环境，放在 `~/.yuanwei/venv`（和自带向量引擎的 `~/.yuanwei/engine/` 放在一处，不和别的东西打架）。后面的命令都写完整路径，不用你把 `yuanwei` 加进系统路径：
+We recommend a separate environment for Yuanwei at `~/.yuanwei/venv` (next to the built-in vector engine's `~/.yuanwei/engine/`, out of everything else's way). The commands below use full paths, so you don't need to add `yuanwei` to your PATH:
 
 ```
 python3 -m venv ~/.yuanwei/venv
@@ -41,64 +45,68 @@ python3 -m venv ~/.yuanwei/venv
 ~/.yuanwei/venv/bin/yuanwei setup
 ```
 
-不想建环境也行，用 `python3 -m pip install yuanwei`（不要直接写 `pip`：有的电脑上只有 `pip3`）；装完 `yuanwei` 在哪，向导最后会把完整路径写给你。
+You can also skip the environment and use `python3 -m pip install yuanwei` (don't type plain `pip`: some machines only have `pip3`); at the end, the wizard tells you the full path of `yuanwei`.
 
-`yuanwei setup` 是一问一答的向导：检查环境 → 选预设 → 选整理用的模型 → 设密钥（输入时不显示；存在你电脑上只有你能读的一个文件里，几个机器人共用）→ 选要不要开本机向量 → 列出计划 → 你确认了才改。
+`yuanwei setup` is a question-and-answer wizard (in Chinese): check the environment → pick a preset → pick the organizing model → set the key (input is hidden; it is stored in a file on your computer that only you can read, shared by all your bots) → choose whether to turn on local vectors → show the plan → change nothing until you confirm.
 
-| 预设 | 整理 | 检索 |
+| Preset | Organizing | Retrieval |
 |---|---|---|
-| 推荐 | DeepSeek（整理测过） | 关键词＋本机向量（要下载约 600 MB 的模型，问过你才下载；向量：LM Studio 是测过的那一套，自带程序和它几乎一样、没过我们自己定的严格标准） |
-| 轻量 | DeepSeek | 只用关键词 |
-| 自选 | 自己选供应商和模型（没测过） | 自己选 |
-| 全本机（实验） | 本机大模型 | 本机向量 |
+| Recommended (推荐) | DeepSeek (organizing tested) | Keywords + local vectors (needs a model download of about 600 MB, only after asking you; vectors: LM Studio is the tested setup; the built-in program is almost identical to it but did not pass our own strict standard) |
+| Light (轻量) | DeepSeek | Keywords only |
+| Custom (自选) | Your own provider and model (untested) | Your choice |
+| All local (全本机, experimental) | A local LLM | Local vectors |
 
-本机向量有两种来源：**自带**（Mac 的 M 系列；原委替你准备向量程序和模型，下载前先问你、说清大小，下载后按原委这一版钉住的校验码核对；不用你装别的软件）；或者用你电脑上已有的 LM Studio、Ollama。**测过的只有 LM Studio**：自带程序用的是同一个模型文件，算出的向量和 LM Studio 的几乎一样（核对时全量 11,588 句里有 8 句略低于我们定的线，最低 0.9977，没有低于 0.995 的），但没过我们自己定的严格标准，所以不写「测过」。
+Local vectors come from one of two sources. **Built-in** (Apple M-series Macs): Yuanwei prepares the vector program and model for you, asks before downloading and tells you the size, then checks the download against the checksums pinned in this release; you don't need to install anything else. Or **LM Studio / Ollama**, if you already have them. **Only LM Studio is tested.** The built-in program uses the same model file, and its vectors are almost identical to LM Studio's: in a full check, 8 of 11,588 sentences fell slightly below our threshold, the lowest at 0.9977, none below 0.995. It did not pass our own strict standard, so it is not labeled "tested".
 
-也可以让助手来装：把 `docs/让助手来装.md` 交给 Hermes。助手只会先列计划给你看，密钥由你自己在终端里设。
+You can also let your assistant install it: give `docs/让助手来装.md` to Hermes. The assistant only shows you a plan first; you set the key yourself in a terminal.
 
-完整说明（装、用、看状态、卸载，每一步改什么、怎么撤回）：`docs/装到Hermes上.md`。
+The full guide (install, use, check status, uninstall; what each step changes and how to undo it) is `docs/装到Hermes上.md`, in Chinese.
 
-## 你说了算
+## You stay in control
 
-- **这个窗口别用记忆。** 说一句「别用记忆」，或者在消息第一行写 `#yuanwei-nomem`，这个对话窗口就不再查原委的记忆，直到你重新打开。打开要你自己确认：回一句「确认开启」，或者第一行写 `#yuanwei-mem`，助手替你确认不了。能保证的只有口令；大白话靠助手听懂，可靠度没量过。
-- **删掉一段对话。** 跟助手说一声，你整条回复「确认删除」才删；也可以用命令删。原委里这段对话的原话会删掉，跟它有关的整理文字也一起清掉，删了找不回来。
-- **对话里的密钥先遮掉。** 认得出的 API 密钥、密码，存之前先遮掉，不进记忆，也不发给整理用的模型。认不出的格式可能会漏。
-- **存在你自己的电脑上。** 记忆库是本机的一个 SQLite 文件。整理时会把对话发给你配置的模型服务；向量服务默认只连本机。
-- **只记你本人的话。** 群里别人的话、机器人的话不记。
-- **每个机器人一个库。** Hermes 里新建的机器人要单独装一次原委（对它的目录跑一次向导）；没装之前，复制来的设置不会启用，也不会读写主 Hermes 的库。
-- **整理用的密钥全局一份。** 几个机器人共用，换密钥只换一次（`yuanwei key set`）；某个机器人要用别的，可以单独给它设（`yuanwei key set --this-bot-only --hermes-home 它的目录`）。想换全局目录可设 `YUANWEI_KEY_DIR`（只认绝对路径；目录会被设成只有你能读，要用专门放密钥的目录；终端和 Hermes 服务要用同一个设置）。`yuanwei key status` 只报来源，不显示密钥的值。
-- **Hermes 自带的记忆照常开着。** 原委只占 Hermes「外接记忆插件」那一个位置。上面那个「别用记忆」的开关只管原委，管不到 Hermes 自带的笔记。
+- **No memory in this window.** Say "don't use memory" (别用记忆), or put `#yuanwei-nomem` on the first line of a message, and this conversation window stops searching Yuanwei's memory until you turn it back on. Turning it back on needs your own confirmation: reply exactly 「确认开启」 ("confirm enable"), or put `#yuanwei-mem` on the first line. The assistant cannot confirm for you. Only the commands are guaranteed; plain language relies on the assistant understanding it, and how reliably it does has not been measured.
+- **Delete a conversation.** Tell your assistant; it is deleted only after you reply exactly 「确认删除」 ("confirm delete"). You can also delete it from the command line. The conversation's original messages are removed from Yuanwei, and the filing text that depends on them is cleared too. Deleted content cannot be recovered.
+- **Keys in your messages are masked first.** Recognizable API keys and passwords are masked before anything is stored, so they never enter memory and are never sent to the organizing model. Formats it doesn't recognize may slip through.
+- **Stored on your own computer.** The memory store is a local SQLite file. Organizing sends conversations to the model service you configured; by default the vector service only connects to your own machine.
+- **Only your own words.** Other people's messages in groups, and messages from bots, are not recorded.
+- **One store per bot.** Each new bot you create in Hermes needs Yuanwei installed once more (run the wizard for that bot's directory). Until then, settings copied from elsewhere stay inactive and never read or write the main Hermes store.
+- **One organizing key for all bots.** All your bots share it, so you change it once (`yuanwei key set`). If one bot needs a different key, set it for that bot alone (`yuanwei key set --this-bot-only --hermes-home <its directory>`). To keep the shared key somewhere else, set `YUANWEI_KEY_DIR`: absolute paths only; the directory is made readable only by you, so use one meant just for keys; your terminal and the Hermes service must use the same setting. `yuanwei key status` only reports where the key comes from; it never shows the key itself.
+- **Hermes's own memory stays on.** Yuanwei takes only Hermes's single "external memory plugin" slot. The "no memory" switch above applies to Yuanwei only, not to Hermes's built-in notes.
 
-## 测出来怎么样
+## How it tested
 
-我们写了一份 150 次对话的中文长故事，出了两批题，每批 55 道。三个记忆系统各自整理，再交给同一个回答模型（DeepSeek）作答，每题的材料额度相同（16,000 词元）。下面是答完整的题数（2026-11-02）：
+We wrote a long story in Chinese, spread over 150 conversations, and two batches of questions, 55 each. Three memory systems each organized it, then the same answering model (DeepSeek) answered every question with the same material budget (16,000 tokens). Fully correct answers (2026-11-02):
 
-| 系统 | 第 48 次对话后 | 第 150 次对话后 |
+| System | After conversation 48 | After conversation 150 |
 |---|---|---|
-| 原委 | 50 | 43 |
+| Yuanwei | 50 | 43 |
 | Mem0 | 49 | 43 |
 | Hindsight | 47 | 34 |
-| 不用记忆系统，把之前的全部原话直接给模型（对照，不受额度限制） | 54 | 没测 |
+| No memory system: all earlier original messages given straight to the model (control, no budget limit) | 54 | not tested |
 
-限制：
-- 这一版只管你和某一个机器人的一对一：群聊、机器人之间互发的消息不记也不查；想记住群里定的事，回到一对一里说一句；
-- 故事和题是我们自己编的，不是公开测试集；
-- 每个系统只跑了一遍；
-- 判卷的人知道比的是哪几家，换一位判卷人复判时，第 150 次那批 Mem0 比原委多 4 题；
-- 预览版现在的写法，11 月 10 日在同一批题上重答、另一次判卷，是 53 题和 46 题，不和上表直接比。
+Limits:
+- This release only covers one-to-one chats between you and a single bot. Group chats and messages between bots are neither recorded nor searched; to have something decided in a group remembered, say it once in your one-to-one chat.
+- The story and questions are our own, not a public benchmark.
+- Each system ran once.
+- The grader knew which systems were being compared. When a different grader regraded the answers, Mem0 scored 4 more than Yuanwei on the conversation-150 batch.
+- With the way the preview writes memory now, a re-answer of the same questions on November 10, graded separately, scored 53 and 46. Those numbers are not directly comparable with the table above.
 
-公开测试集上的成绩、多跑几遍的波动、费用和速度，后续会补。
+Results on public benchmarks, run-to-run variation, cost and speed will follow.
 
-## 文档
+## Documentation
 
-源代码和下面这些文档都在 GitHub：https://github.com/guzhijun40134679/yuanwei （文档在 `docs/` 目录里）。
+The source code and these documents are on GitHub: https://github.com/guzhijun40134679/yuanwei (the documents are in `docs/`, in Chinese for now).
 
-- `docs/装到Hermes上.md`：给用户看的完整说明。
-- `docs/让助手来装.md`：交给 Hermes，让它照着装。
-- `docs/产品规则表.md`：每一条行为规则和它的边界。
-- `docs/开发说明.md`：给改代码、写接头的人看。
-- `docs/复制关系表.md`：哪些代码从研究目录复制过来。
+- `docs/装到Hermes上.md`: the full user guide.
+- `docs/让助手来装.md`: give it to Hermes and let Hermes install Yuanwei.
+- `docs/产品规则表.md`: every behavior rule and its limits.
+- `docs/开发说明.md`: for people changing the code or writing host adapters.
+- `docs/复制关系表.md`: which code was copied from the research directory.
 
-## 许可
+## Credits
 
-源码公开。PolyForm Noncommercial 1.0.0：个人、学习、研究等非商业用途免费；商业用途要先取得版权人同意。全文见 `LICENSE`，版权人 Junzhi Gu（顾钧之）。
+Designed and directed by Junzhi Gu. The code was written with Claude ([Anthropic](https://github.com/anthropics)); the algorithms, architecture and code were reviewed with GPT through Codex ([OpenAI](https://github.com/openai)).
+
+## License
+
+Source-available under PolyForm Noncommercial 1.0.0: free for personal, learning, research and other non-commercial use; commercial use needs the copyright holder's permission first. Full text in `LICENSE`. Copyright holder: Junzhi Gu (顾钧之).
