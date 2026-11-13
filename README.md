@@ -4,6 +4,8 @@ English | [简体中文](https://github.com/guzhijun40134679/yuanwei/blob/main/R
 
 **Every memory has its origin; every quote has its source.** Long-term memory for AI assistants.
 
+Website: https://yuanwei.dev
+
 > Preview release · research prototype; some features are still being developed and tested. On 2026-11-11 it was installed on Hermes v0.22.0 (+10397) and every item on that checklist passed; what the checklist did not cover is listed under the limits below.
 
 > **Language:** the setup wizard, the command-line messages and the detailed guides in `docs/` are currently in Chinese only.

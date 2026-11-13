@@ -14,7 +14,7 @@ license-files = ["LICENSE", "NOTICE"]
 authors = [{ name = "Junzhi Gu (顾钧之)" }]
 
 [project.urls]
-Homepage = "https://github.com/guzhijun40134679/yuanwei"
+Homepage = "https://yuanwei.dev"
 Source = "https://github.com/guzhijun40134679/yuanwei"
 Issues = "https://github.com/guzhijun40134679/yuanwei/issues"
 
