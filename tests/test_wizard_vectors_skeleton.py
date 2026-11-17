@@ -1,7 +1,7 @@
 """安装向导、预设与供应商、密钥、本机向量的测试骨架（交回点甲：只有清单，没有实现；交回点乙把每一行换成真测试，行数不能少，名字就是将来的测试名）。
 
 每一行：(组, 名字, 标签, 要断言什么)。标签 SPEC＝施工单条目，NEW＝11-11 加的三样。现在跑的「骨架自检」只核：名字不重、施工单「测试至少覆盖」的每一点和新增三样都有行、
-放回缺陷不超过 12 个。真正的骨架行整份跳过（函数体是 pytest.fail，写完实现后不会自己变绿）。设计见 圆桌/产品打包/设计-安装向导与本机向量-2026-11-11.md。
+放回缺陷不超过 12 个。真正的骨架行整份跳过（函数体是 pytest.fail，写完实现后不会自己变绿）。设计文档属于研究资料，不随包发布。
 """
 import pytest
 
@@ -155,7 +155,7 @@ s(G_IDENT, "test_dimension_change_is_caught_on_the_query_path_without_a_probe", 
 # ---- 十一、逐字节不变（SPEC）
 s(G_SAME, "test_all_vectors_present_materials_byte_identical_between_strict_and_partial", "SPEC", "向量齐全：取材和现在逐字节相同（对照改动前跑出的固定样本）")
 s(G_SAME, "offline_replay_v1_v2_v3_v1b_byte_identical", "SPEC", "第一段回放 V1–V3、V1b 逐字节一致")
-s(G_SAME, "offline_150_hybrid_requests_reproduce_110_of_110", "SPEC", "把 yuanwei/src 放最前，在库副本上照离线对比脚本拼请求：110/110 相同（读不了 exam-run 就写明没验，不当成过）")
+s(G_SAME, "offline_150_hybrid_requests_reproduce_110_of_110", "SPEC", "把 yuanwei/src 放最前，在库副本上照离线对比脚本拼请求：110/110 相同（读不了研究侧的库副本就写明没验，不当成过）")
 s(G_SAME, "offline_keyword_mode_and_hybrid_materials_unchanged_vs_head", "SPEC", "关键词模式的输出一字节不变")
 s(G_SAME, "offline_full_existing_suite_still_passes", "SPEC", "现有 1985 条全过（6 条骨架跳过除外）")
 

@@ -10,6 +10,8 @@ import uuid
 from . import cuts as CU
 from . import hosts as H
 from . import pack as PK
+from . import relevance as RL
+from . import util as U
 from .errors import BadCursor, YuanweiError
 from .redact import redact_query
 
@@ -65,13 +67,16 @@ def _recall_page(reader, d, cid, pos, off, path):
     return _search_page(attempt, reader.cfg.recall_page_chars)
 
 
-def recall_first(reader, query, keywords, budget, path, on_search=None):
+def recall_first(reader, query, keywords, budget, path, on_search=None, first_suffix=""):
     """第一次调用：完整选料（可选关键词），把选中的有序原话存进游标，再装第一页。on_search(stats) 在选料返回后调（登记向量调用数）。"""
     query = redact_query(query)                                                           # 查询路径：先过密钥过滤，再进向量请求和游标
     keywords = [redact_query(k) if isinstance(k, str) else k for k in keywords] if isinstance(keywords, (list, tuple)) else keywords
     sel = reader.select_multi(query, keywords, total_budget=budget)
     if on_search:
         on_search(sel["stats"])
+    if reader.cfg.recall_ranked_pages:
+        from . import ranked_pages as RP
+        return RP.first(reader, sel, path=path, tool=True, query=query, queries=[query] + list(keywords or []), first_suffix=first_suffix)
     snap = sel["snapshot"]
     from .reader import _chunk
     chunks = [_chunk(r) for r in sel["selected"]]
@@ -83,9 +88,11 @@ def recall_first(reader, query, keywords, budget, path, on_search=None):
             raise ReturnTooLarge("返回装不进这家宿主的单次上限")
         return {"text": text, "delivered": [], "cursor": None, "cut": snap.cut, "stats": stats, "selected_total": 0}
     d = {"query": query, "queries": [query] + [k for k in (keywords or []) if isinstance(k, str)], "cut": snap.cut, "chunks": chunks, "delivered": {}, "budget": budget,
-         "exclude": sorted(snap.excluded),
+         "exclude": sorted(snap.excluded), "relevance_checked": True,
          "config": {"retrieval": reader.cfg.retrieval, "first_budget": reader.cfg.first_budget, "total_budget": reader.cfg.total_budget, "pool_cap": reader.cfg.pool_cap,
                     "neighbors": reader.cfg.neighbors, "index_version": reader.index_version}, "routes": sel["routes"], "stats": stats}
+    from . import ranked_pages as RP
+    RP.bind(reader, d, path=path)
     cid = uuid.uuid4().hex[:16]
     reader.store.put_cursor(cid, reader.ns, "recall", reader.clock() if reader.clock else None, d)
     page = _recall_page(reader, d, cid, 0, 0, path)
@@ -97,11 +104,16 @@ def recall_first(reader, query, keywords, budget, path, on_search=None):
 
 
 def recall_next(reader, cursor, path):
+    from . import ranked_pages as RP
+    if reader.cfg.recall_ranked_pages:
+        return RP.next_page(reader, cursor, path=path, tool=True)
     cid, pos, off = reader._split_token(cursor)
     cur = reader.store.get_cursor(cid)
     if cur is None or cur["ns"] != reader.ns or cur["kind"] != "recall":
         raise BadCursor("续读游标不存在，或不属于这个工作区的 recall")
     d = cur["data"]
+    RP.validate(reader, d, path=path)
+    reader._check_relevance_cursor(d)
     if pos >= len(d["chunks"]) or off > len(d["chunks"][pos]["content"]):
         raise BadCursor("续读游标指到的位置不在这份结果里")
     reader._check_cursor_exclusion(d, pos)                           # 换了轮次以后，旧游标不能绕过新的排除规则
@@ -114,19 +126,21 @@ def recall_next(reader, cursor, path):
 
 
 # ---------------------------------------------------------------- get_messages
-def _start_tokens(path, cfg_tokens):
-    """起始的一页大小（估算词元）：按各个限制折成码点数的乐观估计（中文每字 3 字节），装不下再缩。"""
+def _start_tokens(path, cfg_tokens, ruler=1):
+    """起始的一页大小（估算词元）：按各个限制折成码点数的乐观估计（中文每字 3 字节），装不下再缩。
+    尺子 1 每个码点按 0.52；尺子 2 按各字符类里最轻的权重（英文那一类）算起点，中文等较重的字符装不下就走下面的缩小；宿主的硬限制 hosts.fits 照旧独立核最终文字。"""
     cps = []
     for l in path.limits:
         cps.append({"cp": l.threshold, "utf16": l.threshold, "bytes": l.threshold // 3, "claude_tok_proxy": l.threshold // 3, "codex_tok": l.threshold * 4 // 3}[l.unit])
     cp = max(1, min(cps)) if cps else cfg_tokens
-    return max(2, min(cfg_tokens, int(cp * 0.52)))
+    w = 0.52 if ruler == 1 else min(U.W_ALNUM, U.W_PUNCT, U.W_A) / 1000.0
+    return max(2, min(cfg_tokens, int(cp * w)))
 
 
 def _render_messages(res, cursor):
     lines = []
     for m in res["messages"]:
-        head = "〔%s｜%s%s｜会话 %s｜%s〕" % (PK.ROLE_CN[m["role"]], m["msg_id"], ("｜挡掉 %d 处" % m["redacted"]) if m.get("redacted") else "", m["session_id"], m["date"] or PK.NONE_DATE)
+        head = RL.quote_prefix(m, PK.ROLE_CN[m["role"]])[:-1] + "｜会话 %s｜%s〕" % (m["session_id"], m["date"] or PK.NONE_DATE)
         if m["range"][0] > 0 or m["truncated"]:
             head += "（片段 %d–%d）" % (m["range"][0], m["range"][1])
         lines.append(head + m["text"])
@@ -135,7 +149,7 @@ def _render_messages(res, cursor):
 
 def get_messages_fit(reader, ids, before, after, cursor, path):
     """返回 {"text", "messages"（msg_id、range）, "cursor", "cut"}。第一次调用按编号取；续读只给游标。每页的最终文字满足宿主路径的全部限制。"""
-    tokens = _start_tokens(path, reader.cfg.get_messages_page_tokens)
+    tokens = _start_tokens(path, reader.cfg.get_messages_page_tokens, reader.cfg.ruler_version)
     start_cursor = cursor
     fixed_cut = None                                                                      # 第一次取到的截点：重试缩小页的时候沿用，不重新取最新的
     for _ in range(40):

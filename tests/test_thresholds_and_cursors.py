@@ -100,8 +100,8 @@ def test_memory_single_turn_exactly_at_char_threshold(tmp_path):
 
 # ---------------------------------------------------------------- 跨工作区的游标
 def _two_workspaces(tmp_path):
-    ma = make_mem(tmp_path, ws="甲", name="s.sqlite", provider=Scripted("skip"), recall_page_chars=300, get_messages_page_tokens=60)
-    mb = make_mem(tmp_path, ws="乙", name="s.sqlite", provider=Scripted("skip"), recall_page_chars=300, get_messages_page_tokens=60)
+    ma = make_mem(tmp_path, ws="甲", name="s.sqlite", provider=Scripted("skip"), neighbors=0, recall_page_chars=500, get_messages_page_tokens=60)
+    mb = make_mem(tmp_path, ws="乙", name="s.sqlite", provider=Scripted("skip"), neighbors=0, recall_page_chars=500, get_messages_page_tokens=60)
     for mem, tag in ((ma, "甲"), (mb, "乙")):
         for i in range(1, 21):
             mem.record("h", "S" + tag, "p%d" % i, "user" if i % 2 else "assistant", "%s库的榴莲酥第%d条：专门用来分页的一句比较长的话。" % (tag, i), time="2027-03-01")

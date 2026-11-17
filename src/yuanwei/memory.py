@@ -29,7 +29,7 @@ from . import redact as RD
 from . import vectors as VX
 from . import embedwork as EW
 from . import keystore as KS
-from .ask import RetryableNetworkError
+from .ask import BudgetBlocked, RetryableNetworkError
 from .cards import LightConfig
 from .config import Config
 from .errors import ConfigError, DeletionIncomplete, HistoryDeleted, Paused, ProviderError, Refused, YuanweiError
@@ -97,6 +97,7 @@ class Memory:
             self.store.put_identity(self.vector_fp, ident)
         self._reader = Reader(self.store, self.ns, self.cfg, self.index_version, self.vector_fp, embed_client, clock=self.clock)
         self.last_flush_errors = []
+        self.send_checks = []                               # 每次发送前的预算核对记录（见 _make_precheck）
         self._deletion_blocked = None                       # 有没做完的删除、恢复不了：这个工作区读被拒、写排队（见 _resume_deletions）
         self._resume_deletions()
         try:
@@ -767,16 +768,46 @@ class Memory:
         return self._worst_send(pr, nbytes)
 
     def worst_step_cny(self, step):
-        """开始新的一步之前的最坏估计（人民币）：每步最多三发，每发按输入字节数（卡片上限＋这一步原话的粗估）和两倍最大输出。
+        """开始新的一步之前的粗估（人民币），**只是提示，不拦**（run 把它放进返回值的 step_estimate_hint），也不是上界：每步最多三发，每发按输入字节数（卡片上限＋这一步原话的粗估）和两倍最大输出。
+        第二问、技术重问会追加整场对话、补找候选和反馈，不受卡片额度限制，所以真正的硬挡是 _make_precheck：每一次请求拼好以后、发出之前，按它的实际字节数核。
+        用这一步封步时绑定的配置（卡片额度、尺子版本）。
         模型不是人民币计价、或没有价格表：返回 None（每日上限 daily_cap_cny 只管人民币行，对这家不起作用；不报一个假数，也不因此卡住）。"""
         chars = 0
         for mid in step["msg_ids"]:
             m = self.store.message_row(self.ns, mid)
             chars += len(m["content"])
-        est_tokens = self.cfg.light.cards_tokens + 4000 + int(chars * 0.52)
-        nbytes = int(est_tokens / 0.52 * 3)
+        bound = self._step_config(step)
+        light = self.cfg.light if isinstance(bound, str) else bound[0]
+        if light.ruler_version == 1:                                       # 尺子 1：原来的算法，一个字不变
+            est_tokens = light.cards_tokens + 4000 + int(chars * 0.52)
+            nbytes = int(est_tokens / 0.52 * 3)
+        else:                                                              # 尺子 2：一个估算单位最多对应 8 个字节（表情：4 字节、0.52），原话每字最多 4 字节
+            nbytes = (light.cards_tokens + 4000) * 8 + chars * 4
         w = self.worst_send_cny(nbytes)
         return None if w is None else STEP.MAX_SENDS * w
+
+    def _request_body_len(self, request):
+        """这次请求最终发出去的请求体字节数：请求带 body_bytes 就用它，否则和提供方同一个序列化函数（紧凑 JSON、整段文字作唯一一条用户消息、带提供方参数）。"""
+        from . import provider as PV
+        if request.get("body_bytes"):
+            return len(request["body_bytes"])
+        params = getattr(self.provider, "params", None) or ((self.cfg.provider or {}).get("params")) or None
+        return len(PV.write_request_bytes(request["text"], params))
+
+    def _make_precheck(self, step_id):
+        """每一次请求（第一问、第二问、每一次技术重问）在最终拼好、真正发出之前核一次：预估费用 ＝ 最终请求体的实际字节数（用提供方同一个序列化函数 provider.write_request_bytes 数，不加余量）按现行价格换算，
+        再加输出预留（worst_out_factor × 65536）；加上今天已记的花费超过 daily_cap_cny，就抛 BudgetBlocked，请求不发出、不算已发送。
+        没有设每日上限、模型不是人民币计价、没有价格表：不核（和以前一样，上限只管人民币行）。每次核的结果记在 self.send_checks（测试和排查用）。"""
+        def precheck(request):
+            cap = self.cfg.daily_cap_cny
+            nbytes = self._request_body_len(request)
+            worst = self.worst_send_cny(nbytes) if cap is not None else None
+            spent = self.store.cost_sum(self.ns, self.clock()[:10])["cny"] if worst is not None else None
+            blocked = worst is not None and spent + worst > cap
+            self.send_checks.append({"step_id": step_id, "question": request.get("question"), "bytes": nbytes, "worst_cny": worst, "spent_cny": spent, "blocked": blocked})
+            if blocked:
+                raise BudgetBlocked("这一次请求（%d 字节）按最坏估计要 %.4f 元，今天已花 %.4f 元，会超过每日上限 %s：不发出" % (nbytes, worst, spent, cap))
+        return precheck
 
     def _make_judge(self, step_id):
         provider = self.provider
@@ -818,12 +849,9 @@ class Memory:
                     out.update(status="backoff", stopped_at=step["step_id"], reason="到 %s 才重试（已连续失败 %d 次）" % (due_at, step["failures"]), retry_at=due_at)
                     return out
                 worst = self.worst_step_cny(step) if self.cfg.daily_cap_cny is not None else None
-                if worst is not None:                                   # 没有价格表、或不是人民币计价的模型：上限不起作用，不核、不暂停
+                if worst is not None:                                   # 只是提示（不拦）：能不能发，由 _make_precheck 在每次发送前按实际请求体字节决定
                     spent = self.store.cost_sum(self.ns, self.clock()[:10])["cny"]
-                    if spent + worst > self.cfg.daily_cap_cny:
-                        self._pause("daily_budget")
-                        out.update(status="paused", reason="daily_budget")
-                        return out
+                    out["step_estimate_hint"] = {"step_id": step["step_id"], "estimate_cny": worst, "spent_cny": spent, "cap_cny": self.cfg.daily_cap_cny, "over_cap": spent + worst > self.cfg.daily_cap_cny}
                 r = self._run_one(step)
                 n += 1
                 if r == "done":
@@ -832,6 +860,9 @@ class Memory:
                     out["abandoned"] += 1
                 elif r == "skipped":
                     out["skipped"] += 1
+                elif r == "budget_blocked":
+                    out.update(status="paused", reason="daily_budget", stopped_at=step["step_id"])
+                    return out
                 elif r == "deletion_interrupt":                    # 整理途中发生了删除：这一轮作废（不是失败），调用方下次再拉起
                     out.update(status="interrupted", stopped_at=step["step_id"], reason="deletion")
                     return out
@@ -876,7 +907,7 @@ class Memory:
         try:
             judge = self._make_judge(sid)
             res = STEP.run_step(gs, ns, sid, step["session_id"], step["k"], messages, judge, self.clock, config=light,
-                                allow_summary_edit=allow_edit, prompt_text=text, strict_grouping=strict)
+                                allow_summary_edit=allow_edit, prompt_text=text, strict_grouping=strict, precheck=self._make_precheck(sid))
         except (WS.StepConflict, WS.StepOrderError, WS.StaleBase) as e:
             self._fail_step(step, repr(e))
             return "%s：%s" % (type(e).__name__, e)
@@ -889,6 +920,9 @@ class Memory:
         if status == "abandoned":
             gs.end_step(ns, sid, "abandoned", now, "abandoned")
             return "abandoned"
+        if status == "budget_blocked":                                    # 预算在发出之前挡下：不算失败、不记失败次数、不改这一步的状态；调用次数和绑定的配置原样留着
+            self._pause("daily_budget")
+            return "budget_blocked"
         if status in ("q1_failed", "q2_failed"):
             only_network = not res.get("reasons")
             if only_network:                                  # 发送次数用在网络类失败上：这是基础设施问题，不记放弃
@@ -906,6 +940,7 @@ class Memory:
             try:
                 snap = json.loads(snap_text)
                 light = LightConfig(**snap["light"])
+                light.split_version, light.ruler_version = Config.snapshot_versions(snap)         # 快照里没有这两项的旧步：split-1、尺子 1，不悄悄升级
                 got = Config.snapshot_version(snap)
                 ok = got == want
                 allow_edit, strict = snap["allow_summary_edit"], snap["strict_grouping"]
@@ -914,9 +949,13 @@ class Memory:
             if not ok:
                 return "步 %s 的配置快照和登记的配置指纹对不上（快照 %s，登记 %s），拒绝发送" % (step["step_id"], got, want)
             return light, allow_edit, strict
-        if want and want != self.cfg.config_version():
-            return "步 %s 封步时的配置（%s）没有存快照、还原不了，当前配置（%s）和它不一致，拒绝发送；请用封步时的配置打开" % (step["step_id"], want, self.cfg.config_version())
-        return self.cfg.light, self.cfg.allow_summary_edit, self.cfg.strict_grouping
+        light = LightConfig(**self.cfg.light.as_dict())                         # 复制一份：不动当前配置里的 light；版本默认是旧版（split-1、尺子 1）
+        if want and want != self.cfg.config_version(legacy=True):
+            if want == self.cfg.config_version():                                # 指纹等于当前配置的新格式指纹：它的切句和尺子版本就是当前配置的（指纹里已经含了）
+                light.split_version, light.ruler_version = self.cfg.split_version, self.cfg.ruler_version
+            else:
+                return "步 %s 封步时的配置（%s）没有存快照、还原不了，当前配置（%s）和它不一致，拒绝发送；请用封步时的配置打开" % (step["step_id"], want, self.cfg.config_version())
+        return light, self.cfg.allow_summary_edit, self.cfg.strict_grouping       # 没有快照又等于旧格式指纹的步是升级前封的：切句、尺子都按旧版
 
     def _abandon(self, step, res, gs=None):
         gs = gs or self.store
@@ -1280,12 +1319,17 @@ class Memory:
                 "long_unorganized": self.store.count_messages(self.ns, "is_long=1"), "paused": self.pause_state(),
                 "retrieval": {"mode": self.cfg.retrieval, "index_version": self.index_version, "vector_identity": self.vector_fp,
                               "vectors": self.store.vector_count(self.vector_fp) if self.vector_fp else 0, "first_budget": self.cfg.first_budget,
-                              "total_budget": self.cfg.total_budget, "pool_cap": self.cfg.pool_cap, "neighbors": self.cfg.neighbors},
+                              "total_budget": self.cfg.total_budget, "pool_cap": self.cfg.pool_cap, "neighbors": self.cfg.neighbors,
+                              "relevance": self._relevance_status(), "query_timeout": VX.query_timeout_status(self.cfg.embedding)},
                 "write": {"prompt": self.cfg.write_prompt, "config_version": self.cfg.config_version(), "store_kind": ws["store_kind"], "store_version": ws["store_version"]},
                 "cost": cost, "cost_today": self.cost_today(), "read_permission": self.read_permission(), "lock_held": self.lock_held(),
                 "redaction": self._redaction_status(ws), "deletion": self._deletion_status(),
                 "organizer": self._organizer_status(), "vectors": self._vectors_status(), "spawn_log_tail": self.spawn_log_tail(),
                 "operational": {"scope": "current", "note": "backlog、pending_*、failed_steps、abandoned_steps、skipped_steps、done_steps、paused、lock_held 是读取这一刻的当前运营状态，不是 cut 这个截点上的状态"}}
+
+    def _relevance_status(self):
+        from . import relevance_diagnostics as RDG
+        return RDG.from_config(self.cfg, identity=self.store.identity(self.vector_fp) if self.vector_fp else None, vector_fp=self.vector_fp)
 
     def _organizer_status(self):
         """整理供应商：模型、标签、密钥来源（只写来源，不写值）、费用口径（有没有价格表、预算上限管不管用）。"""

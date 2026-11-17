@@ -29,7 +29,7 @@ def plan_only(tmp_path, capsys, name, tag):
 
 def wizard_out(tmp_path, name, tag, last="n"):
     h = make_home(tmp_path, tag)
-    io = FakeIO(["1", "2", "y", "y", "1", "y", last])
+    io = FakeIO(["1", "2", "y", "y", "1", last])
     rc = cli._setup_main(["setup", "--hermes-home", h] + BASE, io=io, sys_=sysx(name))
     return rc, io.text, h
 
@@ -84,7 +84,7 @@ def test_notice_only_does_not_refuse_ask_extra_or_change_defaults(tmp_path):
     rc_d, out_d, hd = wizard_out(tmp_path, "Darwin", "nd", last="y")
     rc_w, out_w, hw = wizard_out(tmp_path, "Windows", "nw", last="y")
     assert rc_d == rc_w == 0
-    io_d, io_w = FakeIO(["1", "2", "y", "y", "1", "y", "y"]), FakeIO(["1", "2", "y", "y", "1", "y", "y"])
+    io_d, io_w = FakeIO(["1", "2", "y", "y", "1", "y"]), FakeIO(["1", "2", "y", "y", "1", "y"])
     h1, h2 = make_home(tmp_path, "q1"), make_home(tmp_path, "q2")
     cli._setup_main(["setup", "--hermes-home", h1] + BASE, io=io_d, sys_=sysx("Darwin"))
     cli._setup_main(["setup", "--hermes-home", h2] + BASE, io=io_w, sys_=sysx("Windows"))

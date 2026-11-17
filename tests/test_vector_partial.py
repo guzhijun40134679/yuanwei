@@ -5,6 +5,8 @@ import sys
 
 import pytest
 
+pytestmark = pytest.mark.usefixtures("calibrated_test_vectors")
+
 from helpers import Clock, Scripted
 from helpers2 import IDENT, TEXTS, FakeEmbedClient, fill, hybrid, organized
 from yuanwei import Config, Memory

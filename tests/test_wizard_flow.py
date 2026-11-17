@@ -19,8 +19,8 @@ def run(argv, sys_=None, io=None):
 
 
 def light_script():
-    # 助手 1；预设 2（轻量）；用 DeepSeek y；已有密钥「用它吗」y；读取范围 1；只在本机终端 y；确认 y
-    return ["1", "2", "y", "y", "1", "y", "y"]
+    # 助手 1；预设 2（轻量）；用 DeepSeek y；已有密钥「用它吗」y；读取范围 1；未启用聊天平台不问账号；确认 y
+    return ["1", "2", "y", "y", "1", "y"]
 
 
 def test_wizard_scripted_answers_and_all_flags_change_exactly_the_same_files(tmp_path):

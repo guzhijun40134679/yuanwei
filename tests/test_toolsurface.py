@@ -4,6 +4,8 @@ import json
 
 import pytest
 
+pytestmark = pytest.mark.usefixtures("calibrated_test_vectors")
+
 from helpers2 import TEXTS, Counter, FakeEmbedClient, fill, hybrid, organized
 from yuanwei import hosts as H
 from yuanwei.access import Access, ToolIdentity
@@ -231,7 +233,7 @@ NEWLINES = "ab\n" * 300
                                          ("编码后变长", [NEWLINES, NEWLINES]), ("混合", [LONG_ZH, EMOJI, NEWLINES, "短"])])
 @pytest.mark.parametrize("unit,limit", [("bytes", 3000), ("utf16", 900), ("cp", 700), ("codex_tok", 500)])
 def test_recall_pages_fit_unit_and_cover_everything_without_gaps(tmp_path, name, texts, unit, limit):
-    mem, acc, surf, ids = setup(tmp_path, texts=texts, profile=small_profile(**{unit: limit}))
+    mem, acc, surf, ids = setup(tmp_path, recall_ranked_pages=False, texts=texts, profile=small_profile(**{unit: limit}))
     cnt = Counter(mem)
     try:
         r = surf.call("recall", {"query": "原话 好的 短的 另一条 ab 长"})
@@ -264,19 +266,19 @@ def test_recall_pages_fit_unit_and_cover_everything_without_gaps(tmp_path, name,
 
 def test_exactly_at_the_limit_fits_and_one_less_splits(tmp_path):
     texts = ["中文原话。" * 30]
-    mem, acc, surf, ids = setup(tmp_path, texts=texts)
+    mem, acc, surf, ids = setup(tmp_path, recall_ranked_pages=False, texts=texts)
     whole = surf.call("recall", {"query": "中文原话"})
     n = independent_units(whole.text)["utf16"]
     assert whole.meta.get("cursor") is None
-    mem2, acc2, surf2, ids2 = setup(tmp_path / "eq", texts=texts, profile=small_profile(utf16=n))
+    mem2, acc2, surf2, ids2 = setup(tmp_path / "eq", recall_ranked_pages=False, texts=texts, profile=small_profile(utf16=n))
     assert surf2.call("recall", {"query": "中文原话"}).meta.get("cursor") is None             # 刚好等于上限：一页
-    mem3, acc3, surf3, ids3 = setup(tmp_path / "lt", texts=texts, profile=small_profile(utf16=n - 1))
+    mem3, acc3, surf3, ids3 = setup(tmp_path / "lt", recall_ranked_pages=False, texts=texts, profile=small_profile(utf16=n - 1))
     r3 = surf3.call("recall", {"query": "中文原话"})
     assert r3.meta.get("cursor") and independent_units(r3.text)["utf16"] <= n - 1             # 差一：分页，且每页仍在限内
 
 
 def test_same_page_refetch_is_identical_and_later_commits_do_not_change_pages(tmp_path):
-    mem, acc, surf, ids = setup(tmp_path, texts=["中文原话。" * 120, "另一条原话" * 50], profile=small_profile(utf16=800))
+    mem, acc, surf, ids = setup(tmp_path, texts=["中文原话。" * 120, "另一条原话" * 50], neighbors=0, profile=small_profile(utf16=1000))
     r1 = surf.call("recall", {"query": "原话"})
     cur = r1.meta["cursor"]
     p2a = surf.call("recall", {"cursor": cur})
@@ -287,7 +289,7 @@ def test_same_page_refetch_is_identical_and_later_commits_do_not_change_pages(tm
 
 
 def test_only_the_delivered_page_is_registered_in_the_log(tmp_path):
-    mem, acc, surf, ids = setup(tmp_path, texts=["中文原话。" * 200], profile=small_profile(utf16=600))
+    mem, acc, surf, ids = setup(tmp_path, recall_ranked_pages=False, texts=["中文原话。" * 200], profile=small_profile(utf16=600))
     r1 = surf.call("recall", {"query": "原话"})
     rows = [x for x in acc.log_rows("pi", "S", "T1") if x["kind"] == "assembled"]
     assert len(rows) == 1 and rows[0]["detail"]["spans"] == r1.meta["delivered"]
@@ -327,7 +329,7 @@ def test_structured_content_is_counted_in_the_final_return():
 
 
 def test_unavoidable_oversize_is_an_error_not_delivered_and_logged(tmp_path):
-    mem, acc, surf, ids = setup(tmp_path, profile=small_profile(cp=20))
+    mem, acc, surf, ids = setup(tmp_path, recall_ranked_pages=False, profile=small_profile(cp=20))
     r = surf.call("recall", {"query": "吃了烤鱼"})
     assert r.status == "error" and r.reason == "return_too_large" and len(r.text) < 700
     kinds = [x["kind"] for x in acc.log_rows("pi", "S", "T1")]
@@ -357,7 +359,7 @@ def test_result_dict_shapes_never_include_structured_content(tmp_path):
 
 
 def test_hybrid_vector_service_is_called_only_on_the_first_page(tmp_path):
-    mem, client = hybrid(tmp_path, texts=["烤鱼" + "，中文原话" * 60 for _ in range(6)])
+    mem, client = hybrid(tmp_path, texts=["烤鱼" + "，中文原话" * 60 for _ in range(6)], neighbors=0)
     acc = Access(mem)
     ids = InProcessIdentity()
     ids.set("pi", "S", "", "T")
@@ -414,7 +416,7 @@ def test_every_real_host_profile_mcp_path_pages_fit_all_its_limits(tmp_path, hos
     读取工具没开放的宿主（身份链没证实）这里把 identity 临时改成 in_process，只为核大小这一层，不说它们的工具已开放。"""
     prof = dataclasses.replace(H.profile(host), identity="in_process")
     texts = ["这是一条很长的中文原话，" * 3000, "😀好的😀谢谢😀" * 3000, "ab\n" * 9000]
-    mem, acc, surf, ids = setup(tmp_path, host=host, texts=texts, profile=prof)
+    mem, acc, surf, ids = setup(tmp_path, recall_ranked_pages=False, host=host, texts=texts, profile=prof)
     path = prof.paths["mcp_return"]
     r = surf.call("recall", {"query": "原话 好的 ab"})
     pages = 0

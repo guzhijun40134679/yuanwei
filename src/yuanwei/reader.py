@@ -16,6 +16,7 @@ from . import encoding as EN
 from . import lstate as LS
 from . import pack as PK
 from . import retrieve as RT
+from . import relevance as RL
 from . import view as LV
 from .redact import redact_query
 from .errors import BadCursor, BadCut, CursorExcluded, ExcludedThisTurn, MissingVector, NotFound, NotVisible, VectorIdentityMismatch
@@ -147,6 +148,13 @@ class Reader:
         if bad:
             raise CursorExcluded("续读游标里还没交的材料有 %d 条属于现在这一轮，不能继续用这个游标；请重新查询" % len(bad))
 
+    def _check_relevance_cursor(self, data):
+        """旧检索游标没有候选资格/来源绑定，不能绕过新门槛继续交材料。主动按编号读取不走此门。相关度下限关着（旧参照）时不查。"""
+        if not self.cfg.relevance_floor:
+            return
+        if data.get("relevance_checked") is not True or any(not ch.get("retrieval_reason") for ch in data["chunks"]):
+            raise BadCursor("这个检索游标没有相关度资格与来源绑定，请重新调用 recall 查询")
+
     def partial(self):
         return self.cfg.retrieval == "hybrid" and getattr(self.cfg, "vector_fallback", "strict") == "partial"
 
@@ -163,8 +171,15 @@ class Reader:
             return "identity_drift"
         return None
 
+    def relevance_policy(self):
+        if self.cfg.retrieval == "hybrid" and not self.vector_fp:
+            raise VectorIdentityMismatch("混合模式需要配置向量的编码身份（vector_identity），现在没有")
+        if not self.cfg.relevance_floor:
+            return RL.off_status()
+        return RL.keyword_status() if self.cfg.retrieval != "hybrid" else RL.resolve(self.store.identity(self.vector_fp) if self.vector_fp else None, self.vector_fp)
+
     def embedder(self):
-        if self.cfg.retrieval != "hybrid":
+        if self.cfg.retrieval != "hybrid" or self.relevance_policy()["status"] == "uncalibrated":
             return None
         if not self.vector_fp:
             raise VectorIdentityMismatch("混合模式需要配置向量的编码身份（vector_identity），现在没有")
@@ -176,19 +191,21 @@ class Reader:
 
     def make_index(self, snap):
         """快照的索引：partial 模式下被拦住（identity_drift）就整次降成关键词，并带上原因。"""
-        return RT.Index(snap.anchors, self.embedder(), degraded=self.blocked_reason() if self.partial() else None)
+        return RT.Index(snap.anchors, self.embedder(), degraded=self.blocked_reason() if self.partial() else None, relevance_policy=self.relevance_policy())
 
     def _prepare_query_vector(self, query):
         """给查询算向量（缓存里没有才去连服务）。strict：出错照旧往外抛。partial：连不上、被拒、回应坏了都不报错，返回原因（service_down／query_vector_unavailable），这一次只用关键词。"""
+        if self.cfg.retrieval == "hybrid" and self.relevance_policy()["status"] == "uncalibrated":
+            return "semantic_uncalibrated"
         if self.cfg.retrieval == "hybrid" and self.embed_client is not None:
             from . import vectors as VX
             if not self.partial():
-                VX.ensure_vectors(self.store, self.store.identity(self.vector_fp), [query], self.embed_client)
+                VX.ensure_query_vectors(self.store, self.store.identity(self.vector_fp), [query], self.embed_client)
                 return None
             if self.blocked_reason():
                 return None
             try:
-                VX.ensure_vectors(self.store, self.store.identity(self.vector_fp), [query], self.embed_client, keep_first=True)
+                VX.ensure_query_vectors(self.store, self.store.identity(self.vector_fp), [query], self.embed_client, keep_first=True)
             except VX.ServiceDown as e:
                 return VX.down_reason(e)
             except VX.ProviderError:
@@ -218,9 +235,9 @@ class Reader:
         tmap, m2o = snap.maps()
         sidx = PK.SessionIndex(snap.rows)
         pk = PK.pack_reference(hits, sidx, snap.by_id, self.mp, tmap, m2o, snap.visible, idx.searcher(), query, first_budget=first, total_budget=total,
-                               nbr=self.cfg.neighbors, cap=self.cfg.pool_cap)
+                               nbr=self.cfg.neighbors, cap=self.cfg.pool_cap, ruler=self.cfg.ruler_version, provenance=idx.last_provenance if idx.provenance_on else None)
         fin = pk["最终"]
-        sel = sorted((snap.by_id[m] for m in fin["选中"]), key=lambda r: r["seq"])
+        sel = sorted((pk["rows_by_id"][m] for m in fin["选中"]), key=lambda r: r["seq"])
         return dict({"cut": snap.cut, "snapshot": snap, "pack": pk, "selected": sel, "material": fin["材料"], "hits": hits, "table": table}, **({"retrieval": info} if info else {}))
 
     def select_multi(self, query, keywords=None, total_budget=None, first_budget=None, cut=None):
@@ -253,7 +270,7 @@ class Reader:
             head = []
             if key != last_key:
                 head.append("会话 %s｜%s" % key)
-            prefix = "〔%s｜%s%s〕" % (PK.ROLE_CN[ch["role"]], ch["msg_id"], ("｜挡掉 %d 处" % ch["redacted"]) if ch.get("redacted") else "")
+            prefix = RL.quote_prefix(ch, PK.ROLE_CN[ch["role"]])
             room = limit_chars - used - sum(len(h) + 1 for h in head) - len(prefix) - 1
             rest = enc[o:]
             if room <= 0 and delivered:
@@ -284,6 +301,13 @@ class Reader:
     def recall(self, query, budget=None, cursor=None, cut=None, limit_chars=None):
         """查记忆（参照档）。第一次调用定下这份结果（工作区、截点、索引版本、查询和取材配置、选中的有序原话），存在库里不再改；
         游标＝「结果编号:下一页的起点」，用同一个游标重取得到同一页，不会换成最新截点。只记本页实际交出的。"""
+        from . import ranked_pages as RP
+        if self.cfg.recall_ranked_pages:
+            if cursor is not None:
+                return RP.next_page(self, cursor, limit=limit_chars)
+            if not isinstance(query, str) or not query.strip():
+                raise ValueError("问题不能是空的")
+            return RP.first(self, self.select(query, total_budget=budget, cut=cut), limit=limit_chars, query=redact_query(query))
         limit = limit_chars or self.cfg.recall_page_chars
         if cursor is not None:
             cid, pos, off = self._split_token(cursor)
@@ -291,6 +315,9 @@ class Reader:
             if cur is None or cur["ns"] != self.ns or cur["kind"] != "recall":
                 raise BadCursor("续读游标不存在，或不属于这个工作区的 recall：%s" % cursor)
             d = cur["data"]
+            RP.validate(self, d, limit=limit_chars)
+            limit = d["page_limit"]
+            self._check_relevance_cursor(d)
             if pos >= len(d["chunks"]) or off > len(d["chunks"][pos]["content"]):
                 raise BadCursor("续读游标指到的位置不在这份结果里")
             self._check_cursor_exclusion(d, pos)
@@ -301,9 +328,10 @@ class Reader:
             sel = self.select(query, total_budget=budget, cut=cut)
             snap = sel["snapshot"]
             chunks = [_chunk(r) for r in sel["selected"]]
-            d = {"query": query, "cut": snap.cut, "chunks": chunks, "delivered": {}, "budget": budget, "exclude": sorted(snap.excluded),
+            d = {"query": query, "cut": snap.cut, "chunks": chunks, "delivered": {}, "budget": budget, "exclude": sorted(snap.excluded), "relevance_checked": True,
                  "config": {"retrieval": self.cfg.retrieval, "first_budget": self.cfg.first_budget, "total_budget": self.cfg.total_budget, "pool_cap": self.cfg.pool_cap,
                             "neighbors": self.cfg.neighbors, "index_version": self.index_version}}
+            RP.bind(self, d, limit=limit)
             cid = uuid.uuid4().hex[:16]
             pos, off = 0, 0
             if not chunks:
@@ -324,6 +352,7 @@ class Reader:
     # ---------------------------------------------------------------- get_messages
     def get_messages(self, ids=None, before=0, after=0, cursor=None, cut=None, encode=True, page_tokens=None):
         """按编号取原话，每页最多 get_messages_page_tokens 估算词元；放不下的条按码点切、给截断标志和游标。游标＝「结果编号:下一页的起点」，绑定消息身份、原话版本（指纹）、截点、码点范围。"""
+        ruler = self.cfg.ruler_version
         limit = page_tokens or self.cfg.get_messages_page_tokens          # page_tokens：第二段按宿主单位核最终返回时缩小一页用；不给就是配置里的值
         if cursor is not None:
             cid, pos, off = self._split_token(cursor)
@@ -331,6 +360,10 @@ class Reader:
             if cur is None or cur["ns"] != self.ns or cur["kind"] != "get_messages":
                 raise BadCursor("续读游标不存在，或不属于这个工作区的 get_messages：%s" % cursor)
             d = cur["data"]
+            if d.get("origin") == "note":
+                self._check_relevance_cursor(d)
+            if d.get("ruler") != self.cfg.ruler_version:                 # 游标记着分页时用的尺子版本：对不上、或旧游标没有这一项，明确拒绝，不静默换页界
+                raise BadCursor("这个续读游标是按别的估算尺子分的页（游标尺子 %r，现在 %r），页界会变：请重新查（用消息编号重新调用 get_messages）" % (d.get("ruler"), self.cfg.ruler_version))
             if pos >= len(d["chunks"]) or off > len(d["chunks"][pos]["content"]):
                 raise BadCursor("续读游标指到的位置不在这份结果里")
             self._check_cursor_exclusion(d, pos)
@@ -362,7 +395,7 @@ class Reader:
                         want.append(lst[j])
             want.sort(key=lambda m: snap.by_id[m]["seq"])
             chunks = [_chunk(snap.by_id[m]) for m in want]
-            d = {"cut": snap.cut, "chunks": chunks, "exclude": sorted(snap.excluded)}
+            d = {"cut": snap.cut, "chunks": chunks, "exclude": sorted(snap.excluded), "ruler": self.cfg.ruler_version}
             cid = uuid.uuid4().hex[:16]
             pos, off = 0, 0
             self.store.put_cursor(cid, self.ns, "get_messages", self.clock() if self.clock else None, d)
@@ -371,29 +404,29 @@ class Reader:
             ch = d["chunks"][i]
             text = self.mp.encode(ch["content"]) if encode else ch["content"]
             rest = text[o:]
-            head = "〔%s｜%s%s〕" % (PK.ROLE_CN[ch["role"]], ch["msg_id"], ("｜挡掉 %d 处" % ch["redacted"]) if ch.get("redacted") else "")
-            cost = est_tokens_line(head + rest)
+            head = RL.quote_prefix(ch, PK.ROLE_CN[ch["role"]])
+            cost = est_tokens_line(head + rest, ruler)
             if used + cost <= limit:
                 out.append(_mark({"msg_id": ch["msg_id"], "role": ch["role"], "session_id": ch["session_id"], "date": ch["date"], "text": rest, "range": [o, len(text)], "truncated": False}, ch))
                 used += cost
                 i, o = i + 1, 0
                 continue
             room = limit - used
-            if room <= est_tokens_line(head):
+            if room <= est_tokens_line(head, ruler):
                 if out:
                     break
-                room = est_tokens_line(head) + 1
+                room = est_tokens_line(head, ruler) + 1
             lo, hi = 1, len(rest)
             while lo < hi:                                         # 二分：最长的、估算词元不超过 room 的前缀（至少一个字符，免得死循环）
                 mid = (lo + hi + 1) // 2
-                if est_tokens_line(head + rest[:mid]) <= room:
+                if est_tokens_line(head + rest[:mid], ruler) <= room:
                     lo = mid
                 else:
                     hi = mid - 1
             n = lo
             out.append(_mark({"msg_id": ch["msg_id"], "role": ch["role"], "session_id": ch["session_id"], "date": ch["date"], "text": rest[:n], "range": [o, o + n], "truncated": True}, ch))
             o += n
-            used += est_tokens_line(head + rest[:n])
+            used += est_tokens_line(head + rest[:n], ruler)
             break
         more = i < len(d["chunks"])
         return {"messages": out, "truncated": more, "cursor": "%s:%d:%d" % (cid, i, o) if more else None, "cut": d["cut"], "encoded": bool(encode)}
@@ -438,10 +471,14 @@ def _chunk(r):
     ch = {"msg_id": r["msg_id"], "session_id": r["session_id"], "date": r["date"], "role": r["role"], "content": r["content"], "fingerprint": r["fingerprint"]}
     if r.get("redacted"):                                                  # 挡掉过密钥的原话：读取输出里标「挡掉 N 处」；没挡过的字节不变
         ch["redacted"] = r["redacted"]
+    if r.get("retrieval_reason"):
+        ch["retrieval_reason"] = dict(r["retrieval_reason"])
     return ch
 
 
 def _mark(out, ch):
+    if ch.get("retrieval_reason"):
+        out["retrieval_reason"] = dict(ch["retrieval_reason"])
     if ch.get("redacted"):
         out["redacted"] = ch["redacted"]
     return out

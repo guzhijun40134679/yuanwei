@@ -7,6 +7,9 @@
 这个模块不下载模型、不启动任何服务（下载只在安装向导里、用户同意后由 embedsetup 让本机的 Ollama／LM Studio 做）。
 缺向量：库默认（vector_fallback＝strict）报缺、不退回关键词；产品配置（partial）有向量的照走、缺的只靠关键词，并登记（见 retrieve.Index.info）。
 """
+from contextlib import contextmanager
+from contextvars import ContextVar
+
 import hashlib
 import ipaddress
 import json
@@ -193,7 +196,7 @@ def build_client(emb, clock=time.monotonic, opener=None, config_path=None):
     if emb.get("api_key_env"):
         import os
         key = os.environ.get(emb["api_key_env"]) or None
-    inner = HttpEmbeddingClient(url, emb["model"], api_key=key, timeout=emb.get("timeout_query", 5), dimension=dim, opener=opener)
+    inner = HttpEmbeddingClient(url, emb["model"], api_key=key, timeout=emb.get("timeout_query", 10), dimension=dim, opener=opener)
     return GuardedClient(inner, emb.get("breaker_seconds", 30), clock)
 
 
@@ -209,3 +212,68 @@ def ensure_vectors(store, identity, texts, client, keep_first=False):
             check_vector(v, identity["dimension"])
         store.put_vectors(fp, {text_key(t): v for t, v in zip(chunk, vecs)}, keep_first=keep_first)
     return len(miss)
+
+
+_query_vectors = ContextVar("yuanwei_query_vectors", default=None)
+
+
+@contextmanager
+def query_scope():
+    """一次 recall 的临时共享域；嵌套调用复用，退出后不保留向量或失败。"""
+    if _query_vectors.get() is not None:
+        yield
+        return
+    token = _query_vectors.set({})
+    try:
+        yield
+    finally:
+        _query_vectors.reset(token)
+
+
+def ensure_query_vectors(store, identity, texts, client, keep_first=False):
+    """查询专用：完整身份一致才共享；每个库仍保有自己的正规查询缓存。"""
+    with query_scope():
+        shared = _query_vectors.get()
+        fp = identity_fp(identity)
+        keys = {text_key(t) for t in texts}
+        existing = store.get_vectors(fp, keys)
+        for key, vector in existing.items():
+            shared[(fp, key)] = tuple(vector)
+        copied = {}
+        for key in keys - existing.keys():
+            value = shared.get((fp, key))
+            if isinstance(value, tuple):
+                copied[key] = list(value)
+        if copied:
+            store.put_identity(fp, identity)
+            store.put_vectors(fp, copied, keep_first=keep_first)
+
+        class SharedClient:
+            def embed_batch(self, batch):
+                batch_keys = [(fp, text_key(t)) for t in batch]
+                for key in batch_keys:
+                    error = shared.get(key)
+                    if isinstance(error, ProviderError):
+                        raise error
+                try:
+                    result = client.embed_batch(batch)
+                    if len(result) != len(batch):
+                        raise ProviderError("向量服务回应的条数与查询数不同")
+                    for vector in result:
+                        check_vector(vector, identity["dimension"])
+                except ProviderError as error:
+                    for key in batch_keys:
+                        shared[key] = error
+                    raise
+                for key, vector in zip(batch_keys, result):
+                    shared[key] = tuple(vector)
+                return result
+
+        return ensure_vectors(store, identity, texts, SharedClient(), keep_first=keep_first)
+
+
+def query_timeout_status(emb):
+    """只读提示；显式设置保持原值，不因建议改变诊断退出码。"""
+    value = (emb or {}).get("timeout_query", 10)
+    tight = isinstance(value, (int, float)) and not isinstance(value, bool) and 0 < value < 10
+    return {"seconds": value, "advisory": "查询超时设得偏紧，可以改成 10" if tight else None}

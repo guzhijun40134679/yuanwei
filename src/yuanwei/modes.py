@@ -308,6 +308,9 @@ class ModeRunner:
         pkey, plabel, pidx = primary or (None, "当前工作区", 0)
         got, missed = self._read_extras(tk, lambda reader, m: NT.analyze(reader, text, cfg), extras, t0)
         parts = [(pkey, plabel, pidx, mem, an)] + [(k, lab, i, m, v) for (k, lab, i, m, v) in got]
+        parts = [p for p in parts if NT.finalize(p[4], cfg, cfg.note_tau_kw, cfg.note_tau_vec, persist=None, max_listed=cfg.note_max_listed)["note"]]
+        if not parts:
+            return {"inject": None, "kind": "note_none", "note_status": "no_candidates", "workspaces_not_read": missed}
         path = self.profile.paths["hook_context"]
         dropped = []
         while True:

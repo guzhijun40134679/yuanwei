@@ -23,7 +23,7 @@ from . import storeerr as WS
 from . import util as U
 from .ask import RetryableNetworkError  # noqa: F401
 
-SPLIT_VERSION = "split-1"
+SPLIT_VERSION = "split-1"                 # 旧切法的名字（旧步、旧回放、直接用 LightConfig 默认值的调用）；新切法 split-2 由 LightConfig.split_version 带进来
 MAX_SENDS = 3
 GAP_NO_CANDIDATE = "补找没找到，按已知范围记待定"
 GAP_AFTER_REJUDGE = "重判后仍找不到，按已知范围记待定"
@@ -42,8 +42,10 @@ def default_shortlister(state, messages, config):
     return [r["thread_id"] for r in SL.rank_threads(state, messages, config)]
 
 
-def run_step(store, ns, step_id, session_id, k, messages, judge, clock, config=None, allow_summary_edit=True, prompt_text=None, shortlister=None, strict_grouping=False):
-    """返回 dict：status ∈ committed / replayed / abandoned / q1_failed / q2_failed / model_failed / apparatus_error / commit_failed。"""
+def run_step(store, ns, step_id, session_id, k, messages, judge, clock, config=None, allow_summary_edit=True, prompt_text=None, shortlister=None, strict_grouping=False, precheck=None):
+    """返回 dict：status ∈ committed / replayed / abandoned / q1_failed / q2_failed / model_failed / budget_blocked / apparatus_error / commit_failed。
+    precheck：可选，每一次请求（第一问、第二问、每一次技术重问）拼好以后、发出之前调一次（见 ask.ask）；它抛 BudgetBlocked，这一步就停在原地（budget_blocked），已收下的合格输出下次照旧复用。
+    切句版本和尺子版本取 config.split_version、config.ruler_version（LightConfig 默认是旧版 split-1、尺子 1）。"""
     if not (isinstance(k, int) and not isinstance(k, bool) and k >= 1):
         raise WC.ContractError("步序号 k 必须是正整数，实际 %r" % (k,))
     config = config or LC.LightConfig()
@@ -82,7 +84,7 @@ def run_step(store, ns, step_id, session_id, k, messages, judge, clock, config=N
 
     base_seq = state["seq"]
     st = LS.as_of(state, base_seq)
-    sentences = LC.session_sentences(stored, ns)
+    sentences = LC.session_sentences(stored, ns, config.split_version)
     base["sentences"] = sentences
     prompt_on = LC.render_prompt(prompt_text, allow_summary_edit)
     pfp = WC.sha256_hex(prompt_on)
@@ -90,13 +92,15 @@ def run_step(store, ns, step_id, session_id, k, messages, judge, clock, config=N
     # ---- 初判
     ranked = shortlister(st, stored, config)
     q1req = LC.build_request(st, ns, ranked, stored, sentences, config, store.get_message, prompt_text, allow_summary_edit)
-    q1_task_fp = _fp({"q": "l1", "prompt": pfp, "split": SPLIT_VERSION, "base_seq": base_seq, "msgs": msg_fp_digest, "cards": q1req["cards_text"], "sw": bool(allow_summary_edit),
+    q1_task_fp = _fp({"q": "l1", "prompt": pfp, "split": config.split_version, "base_seq": base_seq, "msgs": msg_fp_digest, "cards": q1req["cards_text"], "sw": bool(allow_summary_edit),
                       "strict": bool(strict_grouping)})
     base["requests"]["q1"] = q1req
     c1 = CV.Ctx(sentences, q1req["shown_threads"], q1req["shown_occasions"], q1req["summaries"], allow_summary_edit=allow_summary_edit, strict_grouping=strict_grouping)
-    a1 = ASK.ask(store, ns, step_id, "q1", q1req, q1_task_fp, lambda raw: CV.convert(raw, c1), judge, _Cap(MAX_SENDS - 1), base_seq, k, session_id)
+    a1 = ASK.ask(store, ns, step_id, "q1", q1req, q1_task_fp, lambda raw: CV.convert(raw, c1), judge, _Cap(MAX_SENDS - 1), base_seq, k, session_id, precheck=precheck)
     n1 = len(store.list_judgments(ns, step_id, "q1"))
     base["q1_sends"], base["reused_q1"] = n1, a1["reused"]
+    if a1["status"] == "budget_blocked":
+        return dict(base, status="budget_blocked", error=a1["error"])
     if a1["status"] == "model_failed":
         return dict(base, status="model_failed", error=a1["error"])
     if a1["status"] == "failed":
@@ -121,13 +125,15 @@ def run_step(store, ns, step_id, session_id, k, messages, judge, clock, config=N
             gap_sentences = [by_sid[sid] for sid in sorted(gap_sids, key=lambda x: int(x[1:]))]
             q2req = LC.build_rejudge_request(st, ns, q1req, prompt_text, sentences, gap_sentences, supp, config)
             base["requests"]["q2"] = q2req
-            q2_task_fp = _fp({"q": "l2", "prompt": WC.sha256_hex(LC.render_prompt(prompt_text, False)), "split": SPLIT_VERSION, "base_seq": base_seq, "q1": _fp(q1), "supp": supp,
+            q2_task_fp = _fp({"q": "l2", "prompt": WC.sha256_hex(LC.render_prompt(prompt_text, False)), "split": config.split_version, "base_seq": base_seq, "q1": _fp(q1), "supp": supp,
                               "text": WC.sha256_hex(q2req["text"])})
             c2 = CV.Ctx(sentences, q1req["shown_threads"], q1req["shown_occasions"], allow_summary_edit=False, phase="rejudge", judge_sids=q2req["judge_sids"],
                         found_threads=q2req["found_threads"], found_occasion_map=q2req["found_occasion_map"], strict_grouping=strict_grouping)
-            a2 = ASK.ask(store, ns, step_id, "q2", q2req, q2_task_fp, lambda raw: CV.convert(raw, c2), judge, _Cap(MAX_SENDS - n1), base_seq, k, session_id)
+            a2 = ASK.ask(store, ns, step_id, "q2", q2req, q2_task_fp, lambda raw: CV.convert(raw, c2), judge, _Cap(MAX_SENDS - n1), base_seq, k, session_id, precheck=precheck)
             base["q2_sends"] = len(store.list_judgments(ns, step_id, "q2"))
             base["reused_q2"] = a2["reused"]
+            if a2["status"] == "budget_blocked":
+                return dict(base, status="budget_blocked", error=a2["error"])
             if a2["status"] == "model_failed":
                 return dict(base, status="model_failed", error=a2["error"])
             if a2["status"] == "failed":

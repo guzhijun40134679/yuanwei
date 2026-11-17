@@ -8,8 +8,13 @@
 import re
 import unicodedata
 
+from . import sentence as SN
+from . import util as U
+
 
 LONG_LIMIT = 60
+LONG_WEIGHT = LONG_LIMIT * 520          # split-2 判「太长」：尺子 2 加权和（千分比，不取整）超过 60 × 520；纯中文正好等于「超过 60 字」。固定用尺子 2 的权重，不跟配置走
+SPLIT_VERSIONS = ("split-1", "split-2")
 # 与 JS String.prototype.trim 一致的空白集
 JS_WS = " \t\n\r\v\f                 　﻿"
 _SENT_RE = re.compile(r"[^。！？；\n]*[。！？；]|[^\n]+")
@@ -27,14 +32,42 @@ def _punct_only(text):
     return all(unicodedata.category(ch)[0] in "PSZC" for ch in text)
 
 
-def split_message(content):
-    """返回 [(start, end)]。"""
+def split_message(content, version="split-1"):
+    """返回 [(start, end)]。version：split-1＝旧切法（只认「。！？；」和换行，超过 60 个码点从逗号切）；split-2＝新切法（另认英文句末，见 sentence.py，太长用尺子 2 的权重判）。"""
+    if version == "split-2":
+        return _split_message_2(content)
+    if version != "split-1":
+        raise ValueError("不认识的切句版本 %r" % (version,))
     raw = []
     for m in _SENT_RE.finditer(content):
         a, b = _trim_span(content, m.start(), m.end())
         if a >= b:
             continue
         if b - a <= LONG_LIMIT:
+            raw.append((a, b))
+            continue
+        pos = a
+        for p in re.findall(r"[^，,]*[，,]|[^，,]+", content[a:b]):
+            pa, pb = _trim_span(content, pos, pos + len(p))
+            pos += len(p)
+            if pa < pb:
+                raw.append((pa, pb))
+    out = []
+    for a, b in raw:
+        if out and _punct_only(content[a:b]):
+            out[-1] = (out[-1][0], b)
+        else:
+            out.append((a, b))
+    return out
+
+
+def _split_message_2(content):
+    raw = []
+    for pa0, pb0 in SN.pieces(content):
+        a, b = _trim_span(content, pa0, pb0)
+        if a >= b:
+            continue
+        if U.ruler2_weight(content[a:b]) <= LONG_WEIGHT:
             raw.append((a, b))
             continue
         pos = a
@@ -64,13 +97,13 @@ def reconstructs(content, spans):
     return content[pos:].strip(JS_WS) == ""
 
 
-def sentences_of_session(messages):
+def sentences_of_session(messages, version="split-1"):
     """一次会话的全部句子，编号 s1、s2……（按消息顺序、消息内按位置）。messages：[{msg_id, role, content, msg_time, session_id, seq}]。
     返回 [{"sid","msg_id","role","date","start","end","text","session_id"}]。"""
     out = []
     n = 0
     for m in sorted(messages, key=lambda m: m["seq"]):
-        spans = split_message(m["content"])
+        spans = split_message(m["content"], version)
         if not reconstructs(m["content"], spans):
             raise ValueError("切句后拼不回原话：%s" % m["msg_id"])
         mt = m.get("msg_time")

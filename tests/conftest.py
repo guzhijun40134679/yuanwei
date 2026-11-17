@@ -43,3 +43,11 @@ def _isolated_home(monkeypatch, tmp_path_factory):
     monkeypatch.setenv("HOME", str(h))
     monkeypatch.delenv("HERMES_HOME", raising=False)
     monkeypatch.delenv("YUANWEI_KEY_DIR", raising=False)                  # 全局密钥目录也只能落在这个临时 HOME 里（~/.yuanwei/keys），不许被真实环境里的设置指到别处
+
+
+@pytest.fixture
+def calibrated_test_vectors(monkeypatch):
+    """旧向量机制回归的显式假标定。只认证 helpers2.IDENT；-1 保留原候选池以隔离本单之外的机制，不是产品门槛。"""
+    from helpers2 import IDENT
+    from yuanwei import relevance as RL, vectors as VX
+    monkeypatch.setitem(RL.CALIBRATIONS, RL.model_key(IDENT), {"threshold": -1.0, "vector_fps": [VX.identity_fp(IDENT)], "evidence": "synthetic-fixture-only"})

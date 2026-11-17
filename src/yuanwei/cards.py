@@ -20,18 +20,21 @@ class LightConfig:
     """可调的默认值。粗筛算法和 12×8 的上限沿用现行；卡片总长度上限 16,000 估算词元。"""
 
     def __init__(self, max_threads=12, max_occasions=8, supplement_max=3, cards_tokens=16000, first_quotes=2, recent_quotes=3, excerpt_chars=60,
-                 max_sends=3, recent_sessions=3, w_overlap=1.0, w_recent=0.5, w_open=0.3):
+                 max_sends=3, recent_sessions=3, w_overlap=1.0, w_recent=0.5, w_open=0.3, ruler_version=1, split_version="split-1"):
         self.max_threads, self.max_occasions, self.supplement_max = max_threads, max_occasions, supplement_max
         self.cards_tokens, self.first_quotes, self.recent_quotes, self.excerpt_chars = cards_tokens, first_quotes, recent_quotes, excerpt_chars
         self.max_sends, self.recent_sessions = max_sends, recent_sessions
         self.w_overlap, self.w_recent, self.w_open = w_overlap, w_recent, w_open
+        # 估算尺子版本和切句版本：直接用 LightConfig 的人（旧回放、旧测试）默认是旧的（尺子 1、split-1）；
+        # Memory 按封步时的快照（顶层的 ruler_version／split_version，缺就是旧版）设进来。它们不进 as_dict（as_dict 是旧快照的 "light" 那一段，保持原样）。
+        self.ruler_version, self.split_version = ruler_version, split_version
 
     def as_dict(self):
-        return dict(self.__dict__)
+        return {k: v for k, v in self.__dict__.items() if k not in ("ruler_version", "split_version")}
 
 
-def _tokens(lines):
-    return U.est_lines(lines) if lines else 0
+def _tokens(lines, ruler=1):
+    return U.est_lines(lines, ruler) if lines else 0
 
 
 def role_zh(role):
@@ -56,9 +59,9 @@ def render_prompt(text, allow_summary_edit):
 
 
 # ---------------------------------------------------------------- 句子
-def session_sentences(messages, ns):
-    """这一次会话切好的句子（编号 s1、s2……），每句多一个 fragment_id（存储里的句子编号）。"""
-    out = SP.sentences_of_session(messages)
+def session_sentences(messages, ns, split_version="split-1"):
+    """这一次会话切好的句子（编号 s1、s2……），每句多一个 fragment_id（存储里的句子编号）。split_version：切句版本（split-1 旧、split-2 新）。"""
+    out = SP.sentences_of_session(messages, split_version)
     for s in out:
         s["fragment_id"] = WC.fragment_id(ns, s["msg_id"], s["start"], s["end"])
     return out
@@ -170,10 +173,10 @@ def candidate_blocks(st, ranked_ids, texts, config):
     return [_Block(v, t, texts, config) for t in keep], dropped, v
 
 
-def _fit(blocks, dropped, limit):
+def _fit(blocks, dropped, limit, ruler=1):
     """让位：先删排名靠后主线的回卡，再删主线卡。"""
     def total():
-        return sum(_tokens(b.lines()) for b in blocks)
+        return sum(_tokens(b.lines(), ruler) for b in blocks)
     n = total()
     while n > limit:
         victim = next((b for b in reversed(blocks) if b.shown), None)
@@ -198,13 +201,14 @@ def build_request(st, ns, ranked_ids, messages, sentences, config, get_message, 
     texts = [s["text"] for s in sentences]
     blocks, dropped, v = candidate_blocks(st, ranked_ids, texts, config)
     dropped = list(dropped) + [d for b in blocks for d in b.dropped]
-    tokens = _fit(blocks, dropped, config.cards_tokens)
+    ruler = getattr(config, "ruler_version", 1)
+    tokens = _fit(blocks, dropped, config.cards_tokens, ruler)
     lines = [l for b in blocks for l in b.lines()] or ["（档案里还没有主线）"]
     cards_text = "\n".join(lines)
     text = "%s\n\n本次会话日期：%s\n候选主线：\n%s\n\n这次对话：\n%s" % (prompt.rstrip("\n"), today or "未知", cards_text, "\n".join(sentence_line(s) for s in sentences))
     return {"question": "q1", "phase": "initial", "text": text, "cards_text": cards_text, "shown_threads": [b.tid for b in blocks],
             "shown_occasions": {oc: b.tid for b in blocks for oc in b.shown}, "dropped": dropped, "not_listed": {b.tid: b.hidden() for b in blocks if b.hidden()},
-            "cards_tokens": tokens if blocks else 0, "total_tokens": _tokens(text.split("\n")), "session_date": today, "allow_summary_edit": bool(allow_summary_edit),
+            "cards_tokens": tokens if blocks else 0, "total_tokens": _tokens(text.split("\n"), ruler), "session_date": today, "allow_summary_edit": bool(allow_summary_edit),
             "summaries": {oc: v.sm.get(oc, "") for b in blocks for oc in b.shown}}
 
 
@@ -252,4 +256,4 @@ def build_rejudge_request(st, ns, initial_req, prompt_text, sentences, gap_sente
         prompt.rstrip("\n"), REJUDGE_NOTE, today or "未知", initial_req["cards_text"], "\n".join(sup_lines) or "（没有）",
         "\n".join(sentence_line(s) for s in sentences), "\n".join(gap_lines))
     return {"question": "q2", "phase": "rejudge", "text": text, "found_threads": found_t, "found_occasions": found_o, "found_occasion_map": occ_map,
-            "judge_sids": [s["sid"] for s in gap_sentences], "total_tokens": _tokens(text.split("\n")), "session_date": today}
+            "judge_sids": [s["sid"] for s in gap_sentences], "total_tokens": _tokens(text.split("\n"), getattr(config, "ruler_version", 1)), "session_date": today}

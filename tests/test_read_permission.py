@@ -61,7 +61,7 @@ def setup(tmp_path, **cfg):
     mem = mk(tmp_path, **cfg)
     mid = next(iter(mem._reader.snapshot().by_id))
     cur = mem._reader.store.put_cursor("c" * 16, "w", "get_messages", None, {"cut": mem.cut(), "chunks": [{"msg_id": mid, "session_id": "S1", "date": "2027-02-01", "role": "user",
-                                                                                                         "content": "x", "fingerprint": mem.store.message_row("w", mid)["fingerprint"]}]})
+                                                                                                         "content": "x", "fingerprint": mem.store.message_row("w", mid)["fingerprint"]}], "ruler": mem.cfg.ruler_version})
     return mem, mid, "c" * 16 + ":0:0"
 
 

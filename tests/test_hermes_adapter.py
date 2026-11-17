@@ -230,13 +230,15 @@ def test_prefetch_modes_tools_only_reminder_note_and_receipt_on_a_banned_turn(tm
     assert TEXTS[1] in note and len(note) <= 8000
 
 
-def test_system_prompt_block_is_the_resident_rule_and_can_be_turned_off(tmp_path):
-    mem, a = mk(tmp_path / "a")
-    assert a.system_prompt_block() == RL.RULES["tools_only"]
-    mem, b = mk(tmp_path / "b", mode="directory")
-    assert b.system_prompt_block() == RL.RULES["directory"]
-    mem, c = mk(tmp_path / "c", resident_rule=False)
-    assert c.system_prompt_block() == ""
+@pytest.mark.parametrize("mode", ("tools_only", "reminder", "note", "directory"))
+def test_system_prompt_block_is_the_resident_rule_and_can_be_turned_off(tmp_path, mode):
+    mem, a = mk(tmp_path / "a", mode=mode)
+    assert a.system_prompt_block() == RL.RULES[mode]
+    assert a.system_prompt_block().count(RL.READING_TIPS) == (1 if mode in ("tools_only", "reminder") else 0)
+    mem, b = mk(tmp_path / "b", mode=mode, resident_rule=False)
+    assert b.system_prompt_block() == ""
+    a.active = False
+    assert a.system_prompt_block() == ""
 
 
 # ================================================================== 工具

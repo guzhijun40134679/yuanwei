@@ -41,7 +41,10 @@ def free_check(text, host_command=False):
 
 
 # ================================================================ 文字识别禁读（2026-11-08 补充施工单二改过：撤掉「带功能／开关／设置就当讨论」，改成按对长期记忆的读取、使用来认）
-CLAUSE_SPLIT = re.compile(r"[，,。;；!！?？\n]")
+# 分句：中文英文的逗号、句号（中文）、分号、叹号、问号、换行；另加英文句号（2026-11-17）：句号后面跟空白，或直接跟汉字，就断，缩写也照断（p.m. 后面的空白也断）；
+# 小数、文件名（3.5、foo.py）点后面既不是空白也不是汉字，不断。禁读宁可多切：切多了，最坏是把一句问话的后半截当成禁令（用户这一窗口不读记忆，随时能再开）；切少了就是「说了别用还在用」。
+# 禁读先转小写，所以不能套「下一句大写才断」。
+CLAUSE_SPLIT = re.compile(r"[，,。;；!！?？\n]|\.(?=\s|[\u3400-\u9fff])")
 QUOTE_PAIRS = (("「", "」"), ("『", "』"), ("“", "”"), ('"', '"'), ("‘", "’"), ("《", "》"))
 QUESTION_LEAD = ("为什么", "为何", "怎么", "如何", "why ", "how ")                  # 以这些开头的分句在问这个功能本身，不算本轮禁令
 PERSIST_ZH = ("以后", "今后", "往后", "从现在起", "从此", "永远", "一直", "始终", "每次")
@@ -65,7 +68,7 @@ GAP_IMPLICIT_NOUN = 8
 EN_EXPLICIT = re.compile(r"\b(?:don't|do not|dont|never)\s+(?:(?:please|just|ever|now|really|even|go and|go|ever)\s+)*(?:use|check|look at|read|refer to|consult|rely on|access|search|load|bring up|mention|reference|pull in)\b([^,.;!?]{0,40})")
 EN_IMPLICIT = re.compile(r"\b(ignore|disregard|without|no)\b((?:\s+(?:all|any|the|my|our|your|anything|everything|of))*)\s+(?=\S)([^,.;!?]{0,40})")
 _TECH = r"(?![- ]?(?:leak|pool|usage|limit|address|allocation|alloc|mapped|map|management|footprint|error|dump|bank|cache|layout|barrier|order|safe|safety|bound|bandwidth))"
-EN_NOUN = re.compile(r"\b(?:(?:previous|past|prior|earlier)\s+(?:conversations?|chats?|sessions?|discussions?|messages?)|chat history|conversation history|context from before|(?:my|our|your|the|long-term|saved|stored)\s+memor(?:y|ies)" + _TECH + r")\b")
+EN_NOUN = re.compile(r"\b(?:(?:previous|past|prior|earlier)\s+(?:conversations?|chats?|sessions?|discussions?|messages?)|old\s+(?:conversations?|chats?)|chat history|conversation history|context from before|(?:my|our|your|the|long-term|saved|stored)\s+memor(?:y|ies)" + _TECH + r")\b")
 EN_NOUN_BARE = re.compile(r"\bmemor(?:y|ies)\b" + _TECH)
 
 
@@ -76,6 +79,16 @@ def _strip_quotes(t):
         else:
             t = re.sub(re.escape(a) + r"[^" + re.escape(a + b) + r"]*" + re.escape(b), " ", t)
     return t
+
+
+def _quoted_out(text):
+    """禁读判断用的文字：先去掉成对引号里的话，再把弯撇号换成 ASCII 撇号。
+    顺序不能反：normalize 会先把 ’ 换成 '，成对的弯单引号 ‘…’ 就配不上了（引号里的样例误触发禁读）；
+    所以先把「字母＋’＋字母」（don’t 这种撇号）换成 '，再配对去引号，剩下的 ’ 最后换。"""
+    t = unicodedata.normalize("NFKC", text).lower()
+    t = re.sub(r"(?<=\w)’(?=\w)", "'", t)
+    t = _strip_quotes(t)
+    return t.replace("’", "'").strip()
 
 
 def _noun_near(s, limit):
@@ -179,7 +192,7 @@ def clause_is_ban(c):
 
 def ban_clauses(text):
     """按分句给出（分句文字，是不是禁读分句）的列表，顺序同原文；引号里的话先去掉。read_ban 就是「其中有一个为真」。给窗口层按先后顺序判最后的表态用。"""
-    t = _strip_quotes(normalize(text))
+    t = _quoted_out(text)
     out = []
     for c in CLAUSE_SPLIT.split(t):
         c = c.strip()
@@ -192,7 +205,7 @@ def ban_clauses(text):
 def read_ban(text):
     """按分句认当前这句话里有没有明确的「别读／别用长期记忆或以前的对话」。引号里的话不算；以「为什么、为何、怎么、why、how」开头的分句（在问这个功能本身）不算；
     修改类（改、修改、删、删除、写、写入、存、记下）不算禁读。单独的 forget、fresh、ignore、历史、记录不算。"""
-    t = _strip_quotes(normalize(text))
+    t = _quoted_out(text)
     for c in CLAUSE_SPLIT.split(t):
         c = c.strip()
         if not c or c.startswith(QUESTION_LEAD):

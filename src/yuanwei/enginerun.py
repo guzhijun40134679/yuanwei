@@ -516,7 +516,7 @@ class ManagedClient:
         self.opener = opener or LoopbackOpener()
         d = defaults(self.emb)
         self.wait = float(d["cold_wait_seconds"]) if role == "query" else 60.0
-        self.timeout = float(self.emb.get("timeout_query", 5)) if role == "query" else float(self.emb.get("timeout_worker", 60))
+        self.timeout = float(self.emb.get("timeout_query", 10)) if role == "query" else float(self.emb.get("timeout_worker", 60))
         self.breaker = float(self.emb.get("breaker_seconds", d["breaker_seconds"]))
         raw = spawner or (lambda: spawn_supervisor(self.paths.root, self.host, extra_args=self._extra()))
         self._last_spawn = None
@@ -612,7 +612,7 @@ def resolve_client(emb, role="query", config_path=None, clock=time.monotonic, op
     dim = (emb.get("identity") or {}).get("dimension")
     key = (os.environ.get(emb["api_key_env"]) or None) if emb.get("api_key_env") else None
     if role == "query":
-        inner = VX.HttpEmbeddingClient(url, emb["model"], api_key=key, timeout=emb.get("timeout_query", 5), dimension=dim, opener=opener)
+        inner = VX.HttpEmbeddingClient(url, emb["model"], api_key=key, timeout=emb.get("timeout_query", 10), dimension=dim, opener=opener)
         return VX.GuardedClient(inner, emb.get("breaker_seconds", 30), clock)
     return VX.HttpEmbeddingClient(url, emb["model"], api_key=key, timeout=emb.get("timeout_worker", 60), dimension=dim, opener=opener)
 

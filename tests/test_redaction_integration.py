@@ -118,7 +118,7 @@ class VecClient:
         return [[1.0, 0.0, 0.0] for _ in texts]
 
 
-def test_query_with_fake_secret_filtered_before_vector_request_cursor_and_note(tmp_path):
+def test_query_with_fake_secret_filtered_before_vector_request_cursor_and_note(tmp_path, calibrated_test_vectors):
     from helpers2 import hybrid
     mem, client = hybrid(tmp_path)
     try:

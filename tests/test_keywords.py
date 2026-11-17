@@ -140,7 +140,7 @@ def test_validation_runs_before_any_search(tmp_path):
         cnt.close()
 
 
-def test_hybrid_counts_queries_and_vector_calls_and_missing_vector_for_an_extra_is_an_error(tmp_path):
+def test_hybrid_counts_queries_and_vector_calls_and_missing_vector_for_an_extra_is_an_error(tmp_path, calibrated_test_vectors):
     mem, client = hybrid(tmp_path)
     got = mem._reader.select_multi("吃了烤鱼", ["贝壳"])
     assert got["stats"]["queries"] == 2 and got["stats"]["vector_calls"] == len(client.calls) == 1

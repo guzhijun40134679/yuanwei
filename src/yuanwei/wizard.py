@@ -467,7 +467,7 @@ def to_toml(top, tables):
     return "".join(out)
 
 
-def build_toml(ch, home, identity=None, weak=False):
+def build_toml(ch, home, identity=None, weak=False, query_timeout=10):
     prov, vec = ch["provider"], ch["vectors"]
     p = {"id": prov["id"], "label": prov["label"], "base_url": prov["base_url"], "timeout": 600, "params": dict({"model": prov["model"]}, **prov["params"])}
     if prov["key_env"]:
@@ -478,14 +478,29 @@ def build_toml(ch, home, identity=None, weak=False):
     top = {"retrieval": "keyword"}
     if vec["mode"] == "llamacpp" and identity:
         top = {"retrieval": "hybrid", "vector_fallback": "partial"}
-        tables["embedding"] = {"managed": True, "runtime": "llamacpp", "engine_dir": vec["engine_dir_resolved"], "model": vec["model"], "timeout_query": 5, "timeout_worker": 60, "backfill_batch": 16,
+        tables["embedding"] = {"managed": True, "runtime": "llamacpp", "engine_dir": vec["engine_dir_resolved"], "model": vec["model"], "timeout_query": query_timeout, "timeout_worker": 60, "backfill_batch": 16,
                                "breaker_seconds": 30, "worker_max_run_seconds": 600, "idle_exit_seconds": CT.ENGINE_DEFAULTS["idle_exit_seconds"], "cold_wait_seconds": CT.ENGINE_DEFAULTS["cold_wait_seconds"],
                                "weak_identity": False, "identity": identity}
     elif vec["mode"] != "none" and identity:
         top = {"retrieval": "hybrid", "vector_fallback": "partial"}
-        tables["embedding"] = {"base_url": vec["url"], "model": vec["model"], "runtime": vec["mode"], "timeout_query": 5, "timeout_worker": 60, "backfill_batch": 16, "breaker_seconds": 30,
+        tables["embedding"] = {"base_url": vec["url"], "model": vec["model"], "runtime": vec["mode"], "timeout_query": query_timeout, "timeout_worker": 60, "backfill_batch": 16, "breaker_seconds": 30,
                                "worker_max_run_seconds": 600, "allow_remote": bool(vec["allow_remote"]) if not VX.is_local_url(vec["url"]) else None, "weak_identity": bool(weak), "identity": identity}
     return to_toml(top, tables)
+
+
+def _preserved_query_timeout(ch, toml_path):
+    """重装同一向量配置时保留用户显式超时；新配置才采用新默认。"""
+    try:
+        import tomllib
+        with open(toml_path, "rb") as f:
+            emb = (tomllib.load(f).get("embedding") or {})
+        vec = ch["vectors"]
+        same = emb.get("runtime") == vec["mode"] and emb.get("model") == vec["model"] and (vec["mode"] == "llamacpp" or emb.get("base_url") == vec.get("url"))
+        if same and "timeout_query" in emb:
+            return emb["timeout_query"]
+    except (OSError, ValueError, TypeError, KeyError):
+        pass
+    return 10
 
 
 # ================================================================ 做计划、执行
@@ -493,6 +508,7 @@ def _planned_toml(ch, home, vp, toml_path):
     """计划里 yuanwei.toml 的新内容。向量选择和已有设置一样（运行方式、模型、地址）时，沿用已有的编码身份——这样内容没变的就不会被列成「更新」；
     选择变了、或已有设置里没有身份：用「还没核验」的版本（内容会变，列进「更新」）。读不了已有设置也一样。"""
     vec = ch["vectors"]
+    query_timeout = _preserved_query_timeout(ch, toml_path)
     ident, weak = None, False
     if vec["mode"] != "none" and os.path.exists(toml_path):
         try:
@@ -506,12 +522,12 @@ def _planned_toml(ch, home, vp, toml_path):
         except Exception:                                                               # noqa: BLE001  读不了就当没有
             ident = None
     if ident is None:
-        return build_toml(ch, home)
+        return build_toml(ch, home, query_timeout=query_timeout)
     ch2 = dict(ch, vectors=dict(vec, engine_dir_resolved=vp.get("engine_dir") or vec.get("engine_dir_resolved")))
     try:
-        return build_toml(ch2, home, ident, weak)
+        return build_toml(ch2, home, ident, weak, query_timeout=query_timeout)
     except Exception:                                                                   # noqa: BLE001
-        return build_toml(ch, home)
+        return build_toml(ch, home, query_timeout=query_timeout)
 
 
 def make_plan(ch, sys_, home, args, hermes_cmd):
@@ -534,6 +550,10 @@ def make_plan(ch, sys_, home, args, hermes_cmd):
     plan["read_scope_label"] = {"isolated": "甲（每个工作区只翻自己）", "life_all": "乙（生活能翻全部，项目只翻自己）", "all_open": "丙（全部互通）"}.get(args.read_scope or HW.DEFAULT_SCOPE)
     db = args.db or os.path.join(home, "yuanwei", "yuanwei.sqlite")
     lines = build_lines(ch, home, db, plan, key, vp, env)
+    from . import owner_diagnostics as OD
+    chat_owners = OD.status(home, owners=kw["owners"], env=sys_.env)
+    lines.extend(" 聊天平台    " + row["message"] for row in chat_owners["platforms"])
+    lines.extend("             " + note for note in chat_owners["notes"] if note not in [r["message"] for r in chat_owners["platforms"]])
     if user_cfg:
         lines.append(" 配置        你用 --config 给了自己的配置文件：原委不改它。请你自己把下面几行加进去：")
         lines += ["   " + l for l in build_toml(ch, home).splitlines() if l.strip() and not l.startswith("#")]
@@ -541,13 +561,44 @@ def make_plan(ch, sys_, home, args, hermes_cmd):
 
 
 def _owners(args):
-    owners = {}
-    for o in args.owner or []:
-        plat, _, ident = o.partition(":")
-        if not plat or not ident:
-            _refuse("bad_owner", "--owner 要写成 平台:编号，例如 telegram:123456")
-        owners.setdefault(plat, []).append(ident)
+    from . import owners as OW
+    owners = OW.parse(args.owner or [])
+    skipped = {OW.platform_name(p) for p in (getattr(args, "skip_owner", None) or [])}
+    if set(owners) & set(skipped):
+        _refuse("owner_and_skip", "同一个平台不能同时给 --owner 和 --skip-owner")
     return owners
+
+
+def _owner_questions(args, io, sys_, home):
+    from . import hermes_platforms as PL
+    from . import owners as OW
+    owners = _owners(args)
+    skipped = {OW.platform_name(p) for p in (getattr(args, "skip_owner", None) or [])}
+    found = PL.discover(home, env=sys_.env)
+    for note in found["notes"]:
+        io.say("  " + note)
+    for row in found["platforms"]:
+        p = row["platform"]
+        io.say("  检测到 %s 的平台配置。%s" % (row["name"], row["hint"]))
+        if owners.get(p):
+            io.say("  %s 已用 --owner 指定 %d 个本人账号。" % (row["name"], len(owners[p])))
+            continue
+        if p not in skipped:
+            while True:
+                value = io.ask("这个平台（%s）上哪个账号是你本人？多个编号用逗号隔开，回车跳过：" % row["name"])
+                if not value:
+                    break
+                try:
+                    supplied = [p + ":" + v.strip() for v in value.split(",")]
+                    OW.parse(supplied)
+                except HS.SetupRefused as e:
+                    io.say("  " + str(e))
+                    continue
+                args.owner = list(args.owner or []) + supplied
+                break
+            if value:
+                continue
+        io.say("  已跳过 %s：这个平台上的话不会记。以后补登记：yuanwei owners set %s --id 本人编号 --hermes-home %s --yes；登记后重启 Hermes。" % (row["name"], p, shlex.quote(str(home))))
 
 
 def apply_plan(ch, pl, sys_, home, args, io=None):
@@ -592,7 +643,7 @@ def apply_plan(ch, pl, sys_, home, args, io=None):
         steps.append("key")
     kw = dict(pl["plan"]["kw"])
     if kw.get("config_path") and not getattr(args, "config_path", None):
-        kw["toml_text"] = build_toml(ch, home, identity, weak)
+        kw["toml_text"] = build_toml(ch, home, identity, weak, query_timeout=_preserved_query_timeout(ch, kw["config_path"]))
     res = HS.apply_install(**kw)
     if identity:
         _store_probe(home, args, kw, identity, res, sys_, rt, vec)
@@ -821,13 +872,7 @@ def interactive(args, io, sys_, home, hermes_cmd):
     io.say("  能翻哪些工作区？\n    1) 乙（默认）：在「生活」里能翻生活和所有项目；在项目里只翻这个项目。\n    2) 甲：每个工作区只翻自己。\n    3) 丙：全部互通。")
     sc = _pick(io, "选 [1]：", 3, 1)
     args.read_scope = {1: None, 2: "isolated", 3: "all_open"}[sc]
-    if not yes(io.ask("你是不是只在本机终端里和 Hermes 聊？ [Y/n]："), True):
-        io.say("  请输入你在聊天软件上的账号，格式 平台:编号，例如 telegram:123456；可以输多个，空行结束。不配的话，聊天软件里的话一条都不会记。")
-        while True:
-            o = io.ask("账号：")
-            if not o:
-                break
-            args.owner = list(args.owner or []) + [o]
+    _owner_questions(args, io, sys_, home)
     return {"host": "hermes", "preset": preset, "provider": prov, "vectors": vec, "key": key}
 
 

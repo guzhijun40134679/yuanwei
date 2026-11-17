@@ -375,11 +375,15 @@ def test_identity_change_recomputes_everything_under_the_new_fp_and_status_expla
     assert v["stale_identities"] and v["stale_identities"][0]["count"] > 0 and v["texts"]["pending"] == 0
 
 
-def test_during_recompute_reads_are_partial_hybrid_never_mixing_old_vectors(tmp_path):
+def test_during_recompute_reads_are_partial_hybrid_never_mixing_old_vectors(tmp_path, monkeypatch, calibrated_test_vectors):
     mem, svc = mkmem(tmp_path, spawn="off")
     fill_some(mem, 6)
     mem.run_vectors()
     new = ident2(runtime_version="r2")
+    # 本例专测换运行身份后的缓存隔离；显式假标定 r2，不能让未标定回退掩盖有/缺向量断言。
+    from yuanwei import relevance as RL
+    key = RL.model_key(new)
+    monkeypatch.setitem(RL.CALIBRATIONS, key, dict(RL.CALIBRATIONS[key], vector_fps=[VX.identity_fp(IDENT), VX.identity_fp(new)]))
     mem2, _s = mkmem(tmp_path, svc=svc, spawn="off", ident=new, emb=dict(EMB, backfill_batch=2))
     mem2.recall("烤鱼")
     assert mem2._reader.retrieval_log[-1]["with_vector"] == 0 and mem2._reader.retrieval_log[-1]["used"] == "keyword_fallback"

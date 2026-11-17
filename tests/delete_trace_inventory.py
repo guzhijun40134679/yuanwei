@@ -243,8 +243,38 @@ REQUEST_KEYS = {
 
 # cursors.data 的键（reader.py、paging.py、note.py 里 put_cursor 写的）
 CURSOR_KEYS = {
-    "query": col(A, "void", "查询原文"), "queries": col(A, "void", "查询原文加补充关键词"), "cut": col(C, "void"), "chunks": col(A, "void", "整段原话（content）和指纹"), "delivered": col(C, "void"),
+    'groups': col(C, "void", "固定页计划、显示配置或来源引用元数据；不含跨区正文或正文指纹"),
+    'pages': col(C, "void", "固定页计划、显示配置或来源引用元数据；不含跨区正文或正文指纹"),
+    'paging_version': col(C, "void", "固定页计划、显示配置或来源引用元数据；不含跨区正文或正文指纹"),
+    'page_mode': col(C, "void", "固定页计划、显示配置或来源引用元数据；不含跨区正文或正文指纹"),
+    'paging_config': col(C, "void", "固定页计划、显示配置或来源引用元数据；不含跨区正文或正文指纹"),
+    'page_path': col(C, "void", "固定页计划、显示配置或来源引用元数据；不含跨区正文或正文指纹"),
+    'page_limit': col(C, "void", "固定页计划、显示配置或来源引用元数据；不含跨区正文或正文指纹"),
+    'page_tool': col(C, "void", "固定页计划、显示配置或来源引用元数据；不含跨区正文或正文指纹"),
+    'sources': col(C, "void", "固定页计划、显示配置或来源引用元数据；不含跨区正文或正文指纹"),
+    'read_scope': col(C, "void", "固定页计划、显示配置或来源引用元数据；不含跨区正文或正文指纹"),
+    'read_labels': col(C, "void", "固定页计划、显示配置或来源引用元数据；不含跨区正文或正文指纹"),
+    "first_suffix": col(A, "void", "已脱敏的未采用关键词提示，随游标清除"),
+    "query": col(A, "void", "查询原文"), "queries": col(A, "void", "查询原文加补充关键词"), "cut": col(C, "void"), "chunks": col(A, "void", "整段原话（content）、指纹、来源说明；嵌套字段见 CURSOR_CHUNK_KEYS / CURSOR_REASON_KEYS；受影响工作区整份 data 作废"), "delivered": col(C, "void"),
     "budget": col(C, "void"), "exclude": col(C, "void"), "config": col(C, "void"), "routes": col(C, "void"), "stats": col(C, "void"), "origin": col(C, "void"),
+    "ruler": col(C, "void", "分页尺子的版本号；无原话"),
+    "relevance_checked": col(C, "void", "布尔资格绑定标记；没有原话；与受影响工作区整个游标 data 一起作废"),
+    "void": col(C, "keep", "删除后 data 唯一保留的固定状态码 history_deleted；不含原话、消息编号或来源说明"),
+}
+
+# chunks 中新增的来源标签只含固定类别、数值和编号，但仍随整份游标清除，不保留附带材料对已删消息的 parent 引用。
+CURSOR_CHUNK_KEYS = {
+    "seq": col(C, "void", "源消息排序号"),
+    "msg_id": col(C, "void"), "session_id": col(C, "void"), "date": col(C, "void"), "role": col(C, "void"),
+    "content": col(A, "void", "编码前的整条原话"), "fingerprint": col(H, "void", "原话指纹，随游标删除"),
+    "redacted": col(C, "void", "挡掉密钥的计数"),
+    "retrieval_reason": col(C, "void", "固定命中类别、余弦数值、模型身份和关联消息编号；逐字段见 CURSOR_REASON_KEYS"),
+}
+CURSOR_REASON_KEYS = {
+    "kind": col(C, "void", "固定类别 keyword / semantic / neighbor / occasion，不是模型生成的解释"),
+    "score": col(C, "void", "余弦数值或 null，没有原话"),
+    "vector_fp": col(C, "void", "编码模型身份指纹，不是原话哈希；不混用向量缓存，游标本体仍全清"),
+    "parent": col(C, "void", "附带材料所关联的直接命中消息编号；受影响工作区全部游标作废，不保留指向已删消息的说明"),
 }
 
 # 待补文件、领取文件、待核文件里一行的键

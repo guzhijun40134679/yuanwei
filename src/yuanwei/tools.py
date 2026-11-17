@@ -108,6 +108,9 @@ class ToolSurface:
             return res
 
     def _map_error(self, tk, e):
+        from .ranked_pages import GroupTooLarge
+        if isinstance(e, GroupTooLarge):
+            return _err("group_too_large", str(e))
         if isinstance(e, PG.ReturnTooLarge):
             self.acc.event(tk, "oversize_blocked", {"reason": str(e)[:200]})
             return _err("return_too_large", "返回内容装不进这家宿主这条路径的单次上限，没有交付（本插件的错误，不是空结果）。")
@@ -122,7 +125,7 @@ class ToolSurface:
         if isinstance(e, BadCut):
             return _err("bad_cut", "截点不合法。")
         if isinstance(e, BadCursor):
-            return _err("bad_cursor", "续读游标不存在、不属于这个工作区，或指到的位置不在这份结果里。")
+            return _err("bad_cursor", "续读游标不存在、分页规则或配置已改变，或不属于这次读取，请重新查。")
         if isinstance(e, MissingVector):
             return _err("missing_vector", "缺向量：这次查询需要的向量不在缓存里（不退回关键词、不当成没有命中）。")
         if isinstance(e, VectorIdentityMismatch):
@@ -169,10 +172,12 @@ class ToolSurface:
             if budget is not None and (isinstance(budget, bool) or not isinstance(budget, int) or budget <= 0):
                 return _err("bad_arguments", "budget 要是正整数（估算词元）。")
             from . import queries as Q
+            from .redact import redact_query
             kw, dropped = Q.clip_extras(q, kw)                                                 # 去空去重后超过 3 项：只取前 3 项，结果里说明丢了哪几项；3 项以内原样（请求逐字节不变）
+            dropped = [redact_query(k) for k in dropped]
             Q.normalize(q, kw)                                                                 # 别的关键词不合规：在任何检索之前报错
             self.acc.mark_search(tk)
-            page = PG.recall_first(rd, q, kw, budget, path, on_search=lambda st: st["vector_calls"] and self.acc.mark_vector(tk, st["vector_calls"]))
+            page = PG.recall_first(rd, q, kw, budget, path, on_search=lambda st: st["vector_calls"] and self.acc.mark_vector(tk, st["vector_calls"]), first_suffix=Q.clip_note(dropped) if dropped and rd.cfg.recall_ranked_pages else "")
             while rd.retrieval_log:                                                            # 混合模式：这一次用了什么检索、缺几条、什么原因，进读取登记
                 self.acc.event(tk, "retrieval", rd.retrieval_log.pop(0))
         meta = {"delivered": page["delivered"], "cursor": page["cursor"], "cut": page["cut"], "selected_total": page["selected_total"]}
@@ -180,9 +185,47 @@ class ToolSurface:
             meta["queries"] = page["stats"]["queries"]
         text = page["text"]
         if cursor is None and dropped:
-            text = text + "\n" + Q.clip_note(dropped)
+            if not rd.cfg.recall_ranked_pages:
+                text = text + "\n" + Q.clip_note(dropped)
             meta["dropped_keywords"] = len(dropped)
         return self._finish(tk, text, page["delivered"], meta)
+
+    def begin_ranked_read(self, ident):
+        """跨区先取得各来源票据；这里只做权限检查，不搜索、不登记交付。调用方持各surface锁。"""
+        if not self.profile.tools_opened:
+            return _err("identity_unproven", self._unsupported_text())
+        if isinstance(ident, UnboundCall):
+            return self._refused(self.acc._refusal(ident.reason, None))
+        ticket = self.acc.start_read(ident, "recall", {"cross_workspace": True})
+        return self._refused(ticket) if isinstance(ticket, dict) else ticket
+
+    def prepare_ranked_selection(self, ticket, args):
+        """只准备选料；最终页由聚合器决定，不能提前调用 _finish。"""
+        from . import queries as Q
+        from .redact import redact_query
+        query, keywords, budget = args.get("query"), args.get("keywords"), args.get("budget")
+        if not isinstance(query, str) or not query.strip():
+            raise BadQuery("要给 query（非空的问题文字）")
+        if budget is not None and (isinstance(budget, bool) or not isinstance(budget, int) or budget <= 0):
+            raise BadQuery("budget 要是正整数")
+        keywords, dropped = Q.clip_extras(query, keywords)
+        dropped = [redact_query(k) for k in dropped]
+        Q.normalize(query, keywords)
+        query = redact_query(query)
+        keywords = [redact_query(k) for k in keywords] if keywords else keywords
+        try:
+            self.mem.check_and_spawn()
+        except Exception as error:
+            self.acc.event(ticket, "spawn_error", {"type": type(error).__name__})
+        reader = self._reader(ticket)
+        self.acc.mark_search(ticket)
+        selection = reader.select_multi(query, keywords, total_budget=budget)
+        stats = selection["stats"]
+        if stats["vector_calls"]:
+            self.acc.mark_vector(ticket, stats["vector_calls"])
+        while reader.retrieval_log:
+            self.acc.event(ticket, "retrieval", reader.retrieval_log.pop(0))
+        return reader, selection, query, [query] + list(keywords or []), Q.clip_note(dropped) if dropped else ""
 
     # ---------------------------------------------------------------- get_messages
     def _get_messages(self, tk, args):

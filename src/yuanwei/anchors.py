@@ -1,10 +1,14 @@
 """锚点切句：一条消息 → 若干锚点（文字、码点起止 [起,止)）。检索用；和整理用的切句（split.py）是两套范围，分别保存。
 切法（取自研究）：先按「。！？；」和换行切，超过 60 字再从逗号处切，去首尾空白后短于 2 字的丢掉。
+索引版本 3（2026-11-17）：新切法，另认英文句末（sentence.py），「太长」按尺子 2 的权重判；编号同版本 2。版本 1、2 保留整套旧切法（包括按 60 个码点从逗号回切），
+已有工作区照它存着的版本切，升级以后新来的消息也一样。
 索引版本：1＝参照回放用的研究版（锚点 order＝消息序号×100＋句序，一条消息最多 98 句，超过就拒收）；
          2＝产品版（order＝消息序号×1,000,000＋句序，单条不限 98 段；排序关系和版本 1 一致，所以不超过 98 句的消息两版的检索结果相同）。
 """
 import re
 
+from . import sentence as SN
+from . import util as U
 from .errors import YuanweiError
 
 
@@ -60,17 +64,45 @@ def anchor_spans(content):
     return out
 
 
+LONG_WEIGHT = LONG_LIMIT * 520       # 版本 3 判「太长」：尺子 2 加权和（千分比，不取整）超过 60 × 520；固定用尺子 2 的权重，不跟配置走
+
+
+def anchor_spans_v3(content):
+    """索引版本 3 的锚点：先按 sentence.pieces（换行、「。！？；」、英文句末）切，去首尾空白，短于 2 字的丢掉；太长（尺子 2 的权重超过 60×520）再从逗号处切。"""
+    out = []
+    for pa, pb in SN.pieces(content):
+        g = content[pa:pb]
+        s = js_trim(g)
+        if len(s) < MIN_LEN:
+            continue
+        start = pa + (len(g) - len(g.lstrip(_JS_WS)))
+        if U.ruler2_weight(s) <= LONG_WEIGHT:
+            out.append((s, start, start + len(s)))
+            continue
+        pos = 0
+        for p in re.findall(r"[^，,]*[，,]|[^，,]+", s):
+            ps = js_trim(p)
+            lead = len(p) - len(p.lstrip(_JS_WS))
+            if len(ps) >= MIN_LEN:
+                out.append((ps, start + pos + lead, start + pos + lead + len(ps)))
+            pos += len(p)
+    for t, a, b in out:
+        if content[a:b] != t:
+            raise AnchorError("锚点 %r 的码点区间 [%d,%d) 对不上正文" % (t, a, b))
+    return out
+
+
 def anchors_for(msg_id, seq, content, index_version):
-    """一条消息的锚点行（供存储）。返回 [{"anchor_id","ord","text","start","end","index_version"}]。"""
-    spans = anchor_spans(content)
+    """一条消息的锚点行（供存储）。返回 [{"anchor_id","ord","text","start","end","index_version"}]。按索引版本选切法：1、2 旧切法，3 新切法。"""
+    if index_version not in (1, 2, 3):
+        raise AnchorError("不认识的索引版本 %r" % (index_version,))
+    spans = anchor_spans_v3(content) if index_version == 3 else anchor_spans(content)
     if index_version == 1:
         if len(spans) > MAX_SENTENCES:
             raise AnchorError("%s：切出 %d 句，超过 %d 句（索引版本 1 不支持；新工作区用索引版本 2）" % (msg_id, len(spans), MAX_SENTENCES))
         factor = V1_FACTOR
-    elif index_version == 2:
-        if len(spans) > V2_MAX:
-            raise AnchorError("%s：切出 %d 句，超过索引版本 2 的上限 %d" % (msg_id, len(spans), V2_MAX))
-        factor = V2_FACTOR
     else:
-        raise AnchorError("不认识的索引版本 %r" % (index_version,))
+        if len(spans) > V2_MAX:
+            raise AnchorError("%s：切出 %d 句，超过索引版本 %d 的上限 %d" % (msg_id, len(spans), index_version, V2_MAX))
+        factor = V2_FACTOR
     return [{"anchor_id": "%s#%d" % (msg_id, i), "ord": seq * factor + i, "text": t, "start": s, "end": e, "index_version": index_version} for i, (t, s, e) in enumerate(spans, 1)]

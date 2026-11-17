@@ -262,7 +262,7 @@ def test_export_uses_the_cut_and_not_vclock(tmp_path):
 
 
 # ------------------------------------------------------------------ 9 混合模式缺一条向量就整次报缺，不退回关键词
-def test_hybrid_missing_vector_for_a_new_original_is_reported_not_degraded(tmp_path):
+def test_hybrid_missing_vector_for_a_new_original_is_reported_not_degraded(tmp_path, calibrated_test_vectors):
     from yuanwei.errors import MissingVector
     mem, _client = hybrid(tmp_path)
     assert mem.recall("预算")["delivered"]
@@ -362,7 +362,7 @@ def test_snapshot_cache_and_cursors_are_bound_to_the_exclusion(tmp_path):
     assert victim not in {a.msg_id for a in s_ex.anchors} and victim in {a.msg_id for a in s_plain.anchors}
     assert rd.snapshot() is s_plain and scoped.snapshot() is s_ex                       # 缓存各管各的
     # get_messages 的续读游标：剩下的页里有被排除的 → 要求重新查询
-    res = rd.get_messages(ids=ids, page_tokens=40)
+    res = rd.get_messages(ids=ids, page_tokens=20)         # 尺子 2 下每条消息更轻，页大小跟着缩，保持「一页只有一两条」
     assert res["cursor"]
     with pytest.raises(CursorExcluded):
         scoped.get_messages(cursor=res["cursor"])
@@ -371,12 +371,14 @@ def test_snapshot_cache_and_cursors_are_bound_to_the_exclusion(tmp_path):
     ok = rd.scoped(frozenset(first_page_ids)).get_messages(cursor=res["cursor"])           # 排除的是已经交过的页：剩下的不受影响
     assert ok["messages"]
     # recall 的续读游标
-    page = rd.recall("今天聊聊编号", limit_chars=90)
+    mem.cfg.neighbors = 0
+    page = rd.recall("今天聊聊编号", limit_chars=260)
     assert page["has_more"]
     cid = page["cursor"].split(":")[0]
-    chunks = rd.store.get_cursor(cid)["data"]["chunks"]
+    data = rd.store.get_cursor(cid)["data"]
+    remaining = data["chunks"][data["pages"][1][0]]["msg_id"]
     with pytest.raises(CursorExcluded):
-        rd.scoped(frozenset({chunks[-1]["msg_id"]})).recall(None, cursor=page["cursor"])
+        rd.scoped(frozenset({remaining})).recall(None, cursor=page["cursor"])
     assert rd.recall(None, cursor=page["cursor"])["text"]
 
 

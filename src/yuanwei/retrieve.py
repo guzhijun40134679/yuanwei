@@ -7,6 +7,7 @@ BM25 的统计池和向量候选池是同一个池，而且只含这次截点内
 import types
 
 from . import rank as RK
+from . import relevance as RL
 from .errors import MissingVector, VectorIdentityMismatch
 from .util import est_tokens_line  # noqa: F401
 from . import vectors as VX
@@ -38,14 +39,17 @@ class Index:
     embedder.partial 为真（vector_fallback＝partial）：池里有向量的锚点走「关键词＋向量」，没有的只靠关键词；查询向量算不出、没有 NumPy，这一次只用关键词；
     这些都不报错，而是记在 info() 里（读取登记用）。向量齐全时和原来逐字节相同。"""
 
-    def __init__(self, anchors, embedder=None, degraded=None):
+    def __init__(self, anchors, embedder=None, degraded=None, relevance_policy=None):
         self.pool = sorted(anchors, key=lambda a: a.order)
         self.by_order = {a.order: a for a in self.pool}
         if len(self.by_order) != len(self.pool):
             raise ValueError("池内 order 有重复")
+        self.relevance_policy = relevance_policy or (RL.resolve(getattr(embedder, "identity", None), getattr(embedder, "fp", None)) if embedder is not None else RL.keyword_status())
+        self.last_provenance = {}
+        self.provenance_on = self.relevance_policy["status"] != "off"   # 相关度下限关着（旧参照）：不筛候选、不记来源
         self.embedder = embedder
         self.partial = bool(getattr(embedder, "partial", False))
-        self.degraded = degraded                       # 整次降成关键词的原因（identity_drift 等）：传进来的
+        self.degraded = degraded or ("semantic_uncalibrated" if self.relevance_policy["status"] == "uncalibrated" else None)  # 整次降成关键词的原因（identity_drift 等）：传进来的
         self._qfail = None                             # 这个索引上查询向量算不出的原因
         self._vec_pool = self.pool
         self._vs = None
@@ -92,7 +96,10 @@ class Index:
         reason = self.degraded or qreason or self._qfail
         w = len(self._vec_pool) if (self._vs is not None) else 0
         if reason:
-            return {"used": "keyword_fallback", "reason": reason, "pool": n, "with_vector": w, "missing": n - w}
+            out = {"used": "keyword_fallback", "reason": reason, "pool": n, "with_vector": w, "missing": n - w}
+            if self.relevance_policy["status"] == "uncalibrated":
+                out["relevance"] = dict(self.relevance_policy)
+            return out
         if n and w == 0:
             return {"used": "keyword_fallback", "reason": "no_vectors_yet", "pool": n, "with_vector": 0, "missing": n}
         if w < n:
@@ -105,8 +112,24 @@ class Index:
         kw_rank = {n: i for i, (n, _) in enumerate(r["kw"], 1)}
         vec_rank = {n: i for i, (n, _) in enumerate(r["vec"], 1)}
         table, order, seen = [], [], set()
+        self.last_provenance = {}
+        scores = dict(r["vec"])
+        floor = self.relevance_policy["threshold"]
         for pos, (o, _s) in enumerate(r["merged"], 1):
+            if not self.provenance_on:                                   # 小修 31 之前的取材：融合名次里的全部都进候选
+                a = self.by_order[o]
+                table.append([pos, a.anchor_id, kw_rank.get(o), vec_rank.get(o)])
+                if a.msg_id not in seen:
+                    seen.add(a.msg_id)
+                    order.append(a.msg_id)
+                continue
+            keyword = o in kw_rank
+            score = scores.get(o)
+            if not keyword and (floor is None or score is None or score < floor):
+                continue
             a = self.by_order[o]
+            reason = {"kind": "keyword" if keyword else "semantic", "score": score, "vector_fp": self.relevance_policy["vector_fp"]}
+            self.last_provenance[a.msg_id] = RL.merge_reason(self.last_provenance.get(a.msg_id), reason)
             table.append([pos, a.anchor_id, kw_rank.get(o), vec_rank.get(o)])
             if a.msg_id not in seen:
                 seen.add(a.msg_id)
@@ -156,6 +179,7 @@ class CacheEmbedder:
 
     def __init__(self, store, fp):
         self.store, self.fp = store, fp
+        self.identity = store.identity(fp)
         if store.identity(fp) is None:
             raise VectorIdentityMismatch("库里没有编码身份 %s… 的向量缓存" % fp[:10])
         self.missing_texts = []

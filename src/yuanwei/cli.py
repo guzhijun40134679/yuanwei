@@ -43,13 +43,14 @@ USER_HELP = """yuanwei：原委，给 AI 助手用的长期记忆（预览版）
 
 给你自己用的命令（每个后面加 -h 看它自己的说明）：
   setup                 安装向导：一问一答，最后列出计划，你确认了才改东西（不问话的写法：setup --host hermes --preset recommended --yes）
-  status hermes         看装得怎么样：装没装、读取范围、各工作区、整理用密钥从哪来、向量、Hermes 里有没有 NumPy、运行以来记了几轮
+  status hermes         看装得怎么样：装没装、读取范围、各工作区、整理用密钥从哪来、向量、Hermes 里有没有 NumPy、运行以来记了几轮、聊天平台本人登记及没记的条数
+  owners set|list|delete [平台]     登记、查看、删除聊天平台的本人账号；set/delete 加 --yes 才改
   key set|status|test|delete        整理用的密钥（输入时不显示；只放在你电脑上只有你能读的文件里）
   vectors setup|status|backfill|prune|serve|stop|remove-engine      本机向量（setup 开或换，status 看进度）
   conversations list|delete|status|resume [hermes]    管对话：看有哪些、删一段（加 --yes 才真的删）；不给 --db 就用 Hermes 接头的库，也可以写成 conversations list hermes
   secrets scan [hermes] 扫一遍库里有没有漏过滤的密钥（只报数，不显示内容）；不给 --db 就用 Hermes 接头的库，也可以写成 secrets scan hermes
   uninstall hermes      卸载（不删你的记忆库和密钥）
-  doctor hermes         核对本机 Hermes 的接口有没有和原委预期的不一样
+  doctor hermes         核对 Hermes 接口和聊天平台本人账号登记
 
 研究和调试用的命令（要先给 --db 库文件 和 --workspace 工作区名）：
   record、end-session、abort-turn、run、resume、recall、get-messages、attachments、read-permission、ask、status、export
@@ -183,6 +184,7 @@ def _setup_main(argv, io=None, sys_=None):
             sp.add_argument("--db", default=None, help="库文件；不给就放在这个 Hermes 分身的家目录下（<hermes_home>/yuanwei/yuanwei.sqlite），工作区是库里的分区")
             sp.add_argument("--read-scope", default=None, choices=["isolated", "life_all", "all_open"], help="读取范围。不给＝乙 life_all：在「生活」里能翻生活和所有项目，在项目里只翻这个项目自己；isolated（甲）＝每个工作区只读自己；all_open（丙）＝全部互通。写入永远只写当前工作区")
             sp.add_argument("--owner", action="append", default=[], metavar="平台:编号", help="聊天平台上哪个账号是你本人，例如 telegram:123456（可重复）。本机终端不用配")
+            sp.add_argument("--skip-owner", action="append", default=[], metavar="平台", help="明确跳过该平台的本人账号登记；该平台的话不会记，可重复")
             sp.add_argument("--mode", default="tools_only", choices=["tools_only", "reminder", "note", "directory"])
             sp.add_argument("--src-path", default=os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
             sp.add_argument("--config", dest="config_path")
@@ -229,13 +231,7 @@ def _setup_main(argv, io=None, sys_=None):
             if host != "hermes":
                 print(json.dumps({"error": "future_host", "message": "%s 是后续更新，现在还不能装；现在只有 hermes。" % host}, ensure_ascii=False), file=sys.stderr)
                 return 2
-            owners = {}
-            for o in a.owner:
-                plat, _, ident = o.partition(":")
-                if not plat or not ident:
-                    print(json.dumps({"error": "bad_owner", "message": "--owner 要写成 平台:编号，例如 telegram:123456"}, ensure_ascii=False), file=sys.stderr)
-                    return 2
-                owners.setdefault(plat, []).append(ident)
+            owners = WZ._owners(a)
             kw = dict(hermes_home=home, db=a.db, read_scope=a.read_scope, owners=owners, mode=a.mode, src_path=a.src_path, replace_provider=a.replace_provider, config_path=a.config_path, spawn=a.spawn, hermes_cmd=cmd, config_method=a.config_method)
             if not a.yes:
                 _out({"applied": False, "plan": HS._public(HS.plan_install(**kw)), "hint": "加 --yes 才会真的改"})
@@ -357,6 +353,8 @@ def _vectors_main(argv, io=None, sys_=None):
             st = Store.open_readonly(db)
             try:
                 out = EW.status(st, db, cfg)
+                from . import relevance_diagnostics as RDG
+                out["relevance"] = RDG.from_config(cfg)
                 if a.check and out.get("enabled"):
                     out["check"] = _vectors_check(st, cfg, sys_, db)
             finally:
@@ -637,14 +635,47 @@ def _key_test_text(prov, value, sys_):
     return {"works": "能用。", "rejected": "不能用（对方拒绝了这把密钥）。", "unverified": "没验成（网络或对方的服务出了问题，不是密钥的问题）。"}[r]
 
 
+def _owners_main(argv):
+    from . import owners as OW
+    from . import hermes_setup as HS
+    ap = SafeParser(prog="yuanwei owners", allow_abbrev=False)
+    ap.add_argument("action", choices=["set", "list", "delete"])
+    ap.add_argument("platform", nargs="?", help="平台名，例如 weixin、telegram")
+    ap.add_argument("--id", dest="ids", action="append", default=[], help="本人账号编号，可重复；set 替换这个平台的名单，delete 不给 --id 则删除该平台全部登记")
+    ap.add_argument("--hermes-home", default=None)
+    ap.add_argument("--yes", action="store_true", help="set/delete 确认修改；不给只列计划")
+    a = ap.parse_args(argv)
+    if a.action != "list" and not a.platform:
+        ap.error("set/delete 必须给平台名")
+    if a.action == "list" and a.ids:
+        ap.error("list 不接受 --id")
+    try:
+        _out(OW.settings(a.hermes_home or _hermes_home_default(), action=a.action, platform=a.platform, ids=a.ids, apply=a.yes))
+        return 0
+    except HS.SetupRefused as e:
+        print(json.dumps({"error": e.code, "message": str(e)}, ensure_ascii=False), file=sys.stderr)
+        return 2
+
+
 def _doctor_main(argv):
-    """yuanwei doctor hermes：读本机装着的 Hermes 源码（只读），逐项核我们依赖的接口。退出码 0＝全对，1＝有变了的，2＝找不到目录。"""
+    """yuanwei doctor hermes：读本机装着的 Hermes 源码（只读），逐项核我们依赖的接口。退出码 0＝接口通过且未发现漏登记，1＝接口变更或平台漏登记，2＝找不到源码目录。"""
     from . import hermes_compat as HC
     ap = SafeParser(prog="yuanwei doctor", allow_abbrev=False)
     ap.add_argument("host", choices=["hermes"])
-    ap.add_argument("--hermes-dir", default=os.path.expanduser("~/.hermes/hermes-agent"), help="Hermes 的安装（源码）目录")
+    ap.add_argument("--hermes-dir", default=None, help="Hermes 的安装（源码）目录")
+    ap.add_argument("--hermes-home", default=None, help="要核对本人账号登记的 Hermes 家目录")
     a = ap.parse_args(argv[1:])
-    rep = HC.doctor(a.hermes_dir)
+    from . import owner_diagnostics as OD
+    home = a.hermes_home or _hermes_home_default()
+    from . import hermes_profile as HP
+    rep = HC.doctor(a.hermes_dir or os.path.join(HP.default_root(home), "hermes-agent"))
+    rep["chat_owners"] = OD.status(home)
+    from . import relevance_diagnostics as RDG
+    rep["relevance"] = RDG.installed(home)
+    if rep["relevance"]["status"] in ("uncalibrated", "invalid_identity", "unavailable") and rep["exit_code"] == 0:
+        rep["exit_code"] = 1
+    if rep["chat_owners"]["missing"] and rep["exit_code"] == 0:
+        rep["exit_code"] = 1
     _out(rep)
     return rep["exit_code"]
 
@@ -785,6 +816,8 @@ def main(argv=None):
         return _vectors_main(raw[1:])
     if raw and raw[0] == "key":
         return _key_main(raw[1:])
+    if raw and raw[0] == "owners":
+        return _owners_main(raw[1:])
     if raw and raw[0] == "doctor":
         return _doctor_main(raw)
     if raw[:2] == ["status", "hermes"]:

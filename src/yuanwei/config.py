@@ -27,11 +27,15 @@ class Config:
     # ---- 读取
     retrieval: str = "keyword"                # keyword（基础，纯标准库）或 hybrid（要向量）
     vector_fallback: str = "strict"           # 混合模式缺向量时：strict＝报错（库默认，研究装置的护栏）；partial＝有向量的照走、缺的只靠关键词，并登记（向导写这个）
-    index_version: int = 2                    # 新工作区用 2（单条不限 98 段）；参照回放用 1
+    index_version: int = 3                    # 新工作区用 3（单条不限 98 段，另认英文句末）；2＝旧切法（已有工作区照存着的版本）；参照回放用 1
+    ruler_version: int = 2                    # 估算词元的尺子：2＝尺子 2（按字符类加权，英文不再多算）；1＝旧尺（研究回放和旧参照用）
+    relevance_floor: bool = True              # 相关度下限：True＝开（默认，关键词命中或达到已标定语义下限才算候选）；False＝关，恢复小修 31 之前的取材（研究回放和旧参照用，不带来源说明）
+    split_version: str = "split-2"            # 整理句子的切法：split-2＝另认英文句末；split-1＝旧切法。只影响以后封的步（封步时写进快照）
     first_budget: int = 16000
     total_budget: int = 24000
     pool_cap: int = 10
     neighbors: int = 1
+    recall_ranked_pages: bool = True          # True：按选料名次整组分页，页内按时间；False：旧参照按整份时间分页
     recall_page_chars: int = 30000            # recall 一页最多多少字符（宿主单次返回上限更小时调小）
     get_messages_page_tokens: int = 8000
     # ---- 便条（自动档）：数值是离线测量前的暂定值；相关度门的门槛待测量后定，在那之前写「关」(None) 并标「待定」
@@ -53,19 +57,27 @@ class Config:
     # ---- 提供方（密钥只写环境变量名）
     provider: dict = dataclasses.field(default_factory=lambda: {"base_url": "https://api.deepseek.com/v1", "api_key_env": "DEEPSEEK_API_KEY", "timeout": 600,
                                                                  "params": dict(MAX_PROVIDER_PARAMS)})
-    # 向量服务；还可以有：identity、runtime、timeout_query（5）、timeout_worker（60）、backfill_batch（16）、breaker_seconds（30）、worker_max_run_seconds（600）、backoff_seconds、allow_remote、weak_identity
+    # 向量服务；还可以有：identity、runtime、timeout_query（10）、timeout_worker（60）、backfill_batch（16）、breaker_seconds（30）、worker_max_run_seconds（600）、backoff_seconds、allow_remote、weak_identity
     embedding: dict = dataclasses.field(default_factory=lambda: {"base_url": None, "api_key_env": None, "model": None, "timeout": 120})
     answer_timezone: str = "Asia/Bangkok"
 
     def validate(self):
         if self.write_prompt not in PROMPT_VERSIONS:
             raise ConfigError("write_prompt 只能是 %s，实际 %r" % (PROMPT_VERSIONS, self.write_prompt))
+        if not isinstance(self.recall_ranked_pages, bool):
+            raise ConfigError("recall_ranked_pages 必须是布尔值")
         if self.retrieval not in ("keyword", "hybrid"):
             raise ConfigError("retrieval 只能是 keyword 或 hybrid，实际 %r" % (self.retrieval,))
         if self.vector_fallback not in ("strict", "partial"):
             raise ConfigError("vector_fallback 只能是 strict 或 partial，实际 %r" % (self.vector_fallback,))
-        if self.index_version not in (1, 2):
-            raise ConfigError("index_version 只能是 1 或 2")
+        if self.index_version not in (1, 2, 3):
+            raise ConfigError("index_version 只能是 1、2 或 3")
+        if self.ruler_version not in (1, 2) or isinstance(self.ruler_version, bool):
+            raise ConfigError("ruler_version 只能是 1 或 2，实际 %r" % (self.ruler_version,))
+        if not isinstance(self.relevance_floor, bool):
+            raise ConfigError("relevance_floor 只能是 true 或 false，实际 %r" % (self.relevance_floor,))
+        if self.split_version not in ("split-1", "split-2"):
+            raise ConfigError("split_version 只能是 split-1 或 split-2，实际 %r" % (self.split_version,))
         if self.note_oversize not in ("stop", "skip"):
             raise ConfigError("note_oversize 只能是 stop 或 skip，实际 %r" % (self.note_oversize,))
         for k in ("note_tau_kw", "note_tau_vec"):
@@ -82,18 +94,28 @@ class Config:
                 raise ConfigError("%s 必须是正整数" % k)
         return self
 
-    def write_snapshot(self):
-        """影响整理输入的那些项的完整快照（封步时存进这一步，执行和重试都按它来）。"""
-        return {"light": self.light.as_dict(), "allow_summary_edit": self.allow_summary_edit, "strict_grouping": self.strict_grouping, "long_limit": self.long_limit}
+    def write_snapshot(self, legacy=False):
+        """影响整理输入的那些项的完整快照（封步时存进这一步，执行和重试都按它来）。
+        切句版本和尺子版本记在顶层（split_version、ruler_version）；两样都是旧版（split-1、尺子 1）时不写这两项，快照和指纹和升级前逐字一样；
+        没有这两项的旧步，执行时按 split-1 和尺子 1 处理（见 snapshot_versions）。legacy＝True：只给「没有存快照的旧步」核指纹用，永远是旧格式。"""
+        snap = {"light": self.light.as_dict(), "allow_summary_edit": self.allow_summary_edit, "strict_grouping": self.strict_grouping, "long_limit": self.long_limit}
+        if not legacy and (self.split_version != "split-1" or self.ruler_version != 1):
+            snap["split_version"], snap["ruler_version"] = self.split_version, self.ruler_version
+        return snap
+
+    @staticmethod
+    def snapshot_versions(snap):
+        """快照里的（切句版本，尺子版本）；没有这两项的旧快照是（split-1，尺子 1）。"""
+        return snap.get("split_version", "split-1"), snap.get("ruler_version", 1)
 
     @staticmethod
     def snapshot_version(snap):
         """快照的指纹（就是写进每一步的配置版本）。"""
         return hashlib.sha256(json.dumps(snap, sort_keys=True).encode("utf-8")).hexdigest()[:12]
 
-    def config_version(self):
+    def config_version(self, legacy=False):
         """写进每一步的配置版本：影响整理输入的那些项的指纹。"""
-        return self.snapshot_version(self.write_snapshot())
+        return self.snapshot_version(self.write_snapshot(legacy))
 
     @classmethod
     def from_dict(cls, d):

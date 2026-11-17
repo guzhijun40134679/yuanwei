@@ -5,6 +5,8 @@ import sys
 
 import pytest
 
+pytestmark = pytest.mark.usefixtures("calibrated_test_vectors")
+
 from helpers import Clock, Scripted, make_mem, say
 from yuanwei import Config, Memory, rank as RK, retrieve as RT
 from yuanwei.errors import MissingVector, NotFound, VectorIdentityMismatch

@@ -3,6 +3,8 @@ import math
 
 import pytest
 
+pytestmark = pytest.mark.usefixtures("calibrated_test_vectors")
+
 from helpers import Clock, Scripted, make_mem
 from yuanwei import Config, Memory, note as NT
 from yuanwei.errors import BadCursor, MissingVector
@@ -163,7 +165,7 @@ def test_note_basic_structure_and_numbers(tmp_path):
     mem = mk(tmp_path)
     r = mem.note("贝壳")
     assert r["status"] == "ok" and r["note"].startswith(NT.NOTE_OPENING)
-    assert r["chars"] == len(r["note"]) <= mem.cfg.note_chars and r["est_tokens"] == NT.text_tokens(r["note"])
+    assert r["chars"] == len(r["note"]) <= mem.cfg.note_chars and r["est_tokens"] == NT.text_tokens(r["note"], mem.cfg.ruler_version)
     lines = r["note"].split("\n")
     s_idx = next(i for i, l in enumerate(lines) if l.startswith("⟪材料开始 "))
     e_idx = next(i for i, l in enumerate(lines) if l.startswith("⟪材料结束 "))

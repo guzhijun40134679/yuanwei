@@ -95,7 +95,7 @@ def test_cost_ledger_records_model_and_fingerprint_and_does_not_pin(tmp_path):
 
 
 def test_recall_pagination_is_complete_stable_and_logs_only_delivered(tmp_path):
-    mem = make_mem(tmp_path, provider=Scripted("skip"), recall_page_chars=400)
+    mem = make_mem(tmp_path, provider=Scripted("skip"), recall_page_chars=400, neighbors=0)
     for i in range(1, 31):
         mem.record("h", "S1", "p%d" % i, "user" if i % 2 else "assistant", "榴莲酥第%d条：这是一句带编号的话，专门用来分页。" % i, time="2027-03-01")
     mem.end_session("h", "S1")

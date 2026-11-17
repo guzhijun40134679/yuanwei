@@ -262,7 +262,7 @@ def _delivered5(mem, seq):
     return sel, [s for s in range(1, 13) if s in got]
 
 
-def test_5_the_delivery_rule_is_message_level_hits_plus_one_neighbour_each_plus_same_occasion_pool(tmp_path):
+def test_5_the_delivery_rule_is_message_level_hits_plus_one_neighbour_each_plus_same_occasion_pool(tmp_path, calibrated_test_vectors):
     """交付只有三个来源：①命中消息（关键词有分的句子所在的消息，加上向量前 50 个句子所在的消息，按消息去重）；②每个命中的前一条和后一条消息（同一次会话里，cfg.neighbors＝1）；③命中所在那一回里还没进来的消息（每回最多 10 条，回内再搜后排序）。
     不在这三个来源里的消息，额度再富余也不交。额度够用时（这个小库只有约 1300 估算词元，额度 16000／24000）不会拿掉任何候选。"""
     # A：问题（第 18 名）和长回答（第 20 名）的最好一句都在向量前 50 里：两条都是命中，一起交
@@ -292,7 +292,7 @@ def test_5_the_delivery_rule_is_message_level_hits_plus_one_neighbour_each_plus_
     assert 10 in got
 
 
-def test_5_budget_and_pool_never_drop_a_candidate_in_a_small_library_but_a_tight_budget_stops_at_the_first_that_does_not_fit(tmp_path):
+def test_5_budget_and_pool_never_drop_a_candidate_in_a_small_library_but_a_tight_budget_stops_at_the_first_that_does_not_fit(tmp_path, calibrated_test_vectors):
     mem, seq, rows = _build5(tmp_path / "d", 18, 20)
     from yuanwei import multi as MU
     big = MU.select_multi(mem._reader, QUERY5)["pack"]
@@ -301,7 +301,7 @@ def test_5_budget_and_pool_never_drop_a_candidate_in_a_small_library_but_a_tight
     assert small["停在"] is not None and len(small["选中"]) < len(big["最终"]["选中"])                    # 额度紧时：按候选次序一条条装，第一条装不下就停（后面的不再看）
 
 
-def test_5_when_the_answers_vectors_are_not_computed_yet_it_is_not_a_hit_and_the_rest_of_the_chain_decides(tmp_path):
+def test_5_when_the_answers_vectors_are_not_computed_yet_it_is_not_a_hit_and_the_rest_of_the_chain_decides(tmp_path, calibrated_test_vectors):
     """真机上向量是后台补算的（status 的 texts.pending）。长回答的向量还没算时它不可能是向量命中；关键词又没命中，就只剩邻居和同回池两条路。
     问题那句在前 50 里（第 18 名）→ 长回答是问题的后一条，作为邻居交；若再没挂回、问题也不在前 50（只是别人的邻居），就拿掉。"""
     mem, seq, rows = _build5(tmp_path / "g", 18, 20, answer_without_vectors=True, vector_fallback="partial")

@@ -269,7 +269,7 @@ def test_r4_snapshot_is_the_full_write_config_and_fingerprint_matches(tmp_path):
     mem.end_session("h", "S1")
     st = mem.store.get_step("w", "step-0001")
     snap = json.loads(st["config_snapshot"])
-    assert set(snap) == {"light", "allow_summary_edit", "strict_grouping", "long_limit"} and snap["allow_summary_edit"] is False and snap["strict_grouping"] is True
+    assert set(snap) == {"light", "allow_summary_edit", "strict_grouping", "long_limit", "split_version", "ruler_version"} and snap["split_version"] == "split-2" and snap["ruler_version"] == 2 and snap["allow_summary_edit"] is False and snap["strict_grouping"] is True
     assert snap["light"] == mem.cfg.light.as_dict()
     assert Config.snapshot_version(snap) == st["config_version"] == mem.cfg.config_version()
 

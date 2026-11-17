@@ -4,6 +4,8 @@ import threading
 
 import pytest
 
+pytestmark = pytest.mark.usefixtures("calibrated_test_vectors")
+
 from helpers import Clock, Scripted, make_mem, out_thread, sids_of
 from helpers2 import TEXTS, Counter, fill, hybrid, organized
 from yuanwei import hosts as H

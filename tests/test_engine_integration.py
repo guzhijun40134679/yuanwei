@@ -211,8 +211,8 @@ def _interactive(w, answers, tmp_path):
 
 
 def _wizard_answers(vec_answers):
-    # 第 2 步助手；第 3 步预设（推荐）；第 4 步 DeepSeek 用这个；第 5 步密钥已有（环境里有）→ 问「用它吗」y；第 6 步 开吗＋向量选择…；第 7 步范围、是不是只在本机
-    return ["1", "1", "y", "y"] + vec_answers + ["1", "y", "y"]
+    # 第 2 步助手；第 3 步预设（推荐）；第 4 步 DeepSeek 用这个；第 5 步密钥已有（环境里有）→ 问「用它吗」y；第 6 步 开吗＋向量选择…；第 7 步范围；无聊天平台不问账号；最后确认
+    return ["1", "1", "y", "y"] + vec_answers + ["1", "y"]
 
 
 def test_interactive_offers_builtin_first_on_apple_silicon_marks_recommended_and_shows_sizes_and_consent(w, tmp_path):
@@ -389,7 +389,7 @@ def test_managed_config_without_base_url_enables_vectors_and_plain_config_unchan
     assert mem2.vectors_enabled() is False
 
 
-def test_engine_down_is_a_partial_vector_read_registered_with_engine_starting_and_does_not_wait(tmp_path):
+def test_engine_down_is_a_partial_vector_read_registered_with_engine_starting_and_does_not_wait(tmp_path, calibrated_test_vectors):
     spawned = []
     emb = {"managed": True, "engine_dir": str(tmp_path / "e"), "identity": IDENT}
     cl = ER.resolve_client(emb, "query", spawner=lambda: spawned.append(1))

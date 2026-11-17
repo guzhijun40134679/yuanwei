@@ -107,7 +107,8 @@ def test_old_cuts_and_cursors_rejected_with_history_deleted_in_fresh_process_too
     cut = mem.cut()
     assert "del_ver" not in cut                                                 # 没发生过删除：截点一字不变
     old = mem.store.cut("w")
-    page = mem.recall("今天聊聊编号", limit_chars=60)
+    mem.cfg.neighbors = 0
+    page = mem.recall("今天聊聊编号", limit_chars=320)
     cursor = page["cursor"]
     assert cursor
     delete(mem)
@@ -306,9 +307,11 @@ def test_cursors_of_affected_workspace_are_void_and_other_workspace_untouched(tm
     mem, _c = world(tmp_path)
     mem2 = make_mem(tmp_path, ws="other", provider=Scripted("skip"))
     say(mem2, "O1", 3, prefix="别的工作区", date="2027-01-03")
-    c_other = mem2.recall("别的工作区", limit_chars=50)
-    mem.recall("今天聊聊编号", limit_chars=50)
+    mem.cfg.neighbors = mem2.cfg.neighbors = 0
+    c_other = mem2.recall("别的工作区", limit_chars=240)
+    mem.recall("今天聊聊编号", limit_chars=320)
     n_other = mem.store.conn.execute("SELECT COUNT(*) FROM cursors WHERE ns='other'").fetchone()[0]
+    assert n_other > 0
     delete(mem)
     assert mem.store.conn.execute("SELECT COUNT(*) FROM cursors WHERE ns='w' AND data LIKE '%history_deleted%'").fetchone()[0] >= 1
     assert mem.store.conn.execute("SELECT COUNT(*) FROM cursors WHERE ns='other'").fetchone()[0] == n_other

@@ -66,7 +66,7 @@ def test_every_entry_has_a_valid_class_and_action_and_the_class_matches_the_acti
         for t, fields in group.items():
             for f, info in fields.items():
                 check("%s.%s.%s" % (name, t, f), info)
-    for name, group in (("JUDGMENT", D.JUDGMENT_KEYS), ("REQUEST", D.REQUEST_KEYS), ("CURSOR", D.CURSOR_KEYS), ("PENDING", D.PENDING_LINE_KEYS), ("REVIEW", D.REVIEW_RECORD_KEYS)):
+    for name, group in (("JUDGMENT", D.JUDGMENT_KEYS), ("REQUEST", D.REQUEST_KEYS), ("CURSOR", D.CURSOR_KEYS), ("CURSOR_CHUNK", D.CURSOR_CHUNK_KEYS), ("CURSOR_REASON", D.CURSOR_REASON_KEYS), ("PENDING", D.PENDING_LINE_KEYS), ("REVIEW", D.REVIEW_RECORD_KEYS)):
         for f, info in group.items():
             check("%s.%s" % (name, f), info)
 
@@ -183,3 +183,58 @@ def test_tombstones_carry_no_content():
     for k, v in D.TOMBSTONES.items():
         assert v, k
     assert D.TOMBSTONES["occ_summary"] == "这条摘要的来源被删了"
+
+
+def _relevance_cursor_scenario(tmp_path, monkeypatch):
+    """真实保存三种来源：语义直接命中、邻近、同回；并建立便条和主动按 ID 的游标。"""
+    from helpers2 import IDENT
+    from test_relevance_floor import memory
+    from yuanwei import relevance as RL, vectors as VX, note as NT
+    monkeypatch.setattr(RL, "CALIBRATIONS", {RL.model_key(IDENT): {"threshold": 0.8, "vector_fps": [VX.identity_fp(IDENT)], "evidence": "synthetic-deletion-test"}})
+    mem, ids = memory(tmp_path, ["经费安排", "晚饭面条", "公园散步", "小狗睡觉"], [0.95, 0.1, 0.2, 0.1], "资金计划", neighbors=1, thread=True, recall_page_chars=100, recall_ranked_pages=False)
+    recall = mem.recall("资金计划")
+    an = NT.analyze(mem._reader, "资金计划", mem.cfg)
+    note_cursor = NT.make_persist(mem._reader, an)(an["hits"])
+    mem._reader.get_messages(ids=ids, page_tokens=15)
+    return mem, ids, recall["cursor"], note_cursor
+
+
+def test_relevance_cursor_nested_fields_have_explicit_deletion_classification(tmp_path, monkeypatch):
+    mem, _ids, _recall, _note = _relevance_cursor_scenario(tmp_path, monkeypatch)
+    kinds = set()
+    for (raw,) in mem.store.conn.execute("SELECT data FROM cursors WHERE ns='w'"):
+        data = json.loads(raw)
+        assert set(data) <= set(D.CURSOR_KEYS)
+        for chunk in data["chunks"]:
+            assert set(chunk) <= set(D.CURSOR_CHUNK_KEYS)
+            reason = chunk.get("retrieval_reason", {})
+            assert set(reason) <= set(D.CURSOR_REASON_KEYS)
+            if reason:
+                kinds.add(reason["kind"])
+    assert kinds == {"semantic", "neighbor", "occasion"}
+    assert D.CURSOR_KEYS["relevance_checked"]["cls"] == D.C
+    assert D.CURSOR_REASON_KEYS["parent"]["action"] == "void"
+    assert D.CURSOR_REASON_KEYS["vector_fp"]["cls"] == D.C
+
+
+def test_deleting_source_voids_whole_relevance_cursor_including_parent_and_identity(tmp_path, monkeypatch):
+    from yuanwei.deletion import DeletionService, legacy_conv_id
+    from yuanwei.errors import HistoryDeleted
+    mem, ids, recall_cursor, note_cursor = _relevance_cursor_scenario(tmp_path, monkeypatch)
+    assert recall_cursor and note_cursor
+    before = [json.loads(row[0]) for row in mem.store.conn.execute("SELECT data FROM cursors WHERE ns='w'")]
+    assert any(c.get("retrieval_reason", {}).get("parent") == ids[0] for d in before for c in d["chunks"])
+    assert any(c.get("retrieval_reason", {}).get("vector_fp") for d in before for c in d["chunks"])
+    service = DeletionService(mem.db_path, config_dir=mem.config_dir, clock=mem.clock)
+    try:
+        result = service.delete_conversation(legacy_conv_id("h", "S", ""))
+    finally:
+        service.close()
+    assert result.status == "complete"
+    after = [json.loads(row[0]) for row in mem.store.conn.execute("SELECT data FROM cursors WHERE ns='w'")]
+    assert len(after) == len(before) and all(d == {"void": "history_deleted"} for d in after)
+    assert mem._reader._snaps == {}
+    with pytest.raises(HistoryDeleted):
+        mem._reader.recall(None, cursor=recall_cursor)
+    with pytest.raises(HistoryDeleted):
+        mem._reader.get_messages(cursor=note_cursor)

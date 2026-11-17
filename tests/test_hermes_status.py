@@ -104,7 +104,7 @@ def test_uninstall_removes_the_runtime_status_file_but_keeps_the_users_memory_an
 
 def test_a_skip_alone_is_written_to_the_status_file_and_the_file_never_holds_owner_ids(tmp_path):
     w = World(tmp_path, scope="isolated", owners={"telegram": ["owner-9981"]})
-    a = w.adapter(None, platform="telegram", user_id="owner-9981", chat_type="group")
+    a = w.adapter(None, platform="telegram", user_id="owner-9981", chat_type="dm")
     turn(a, 1, "群里别人的话", author_id="stranger-1")
     a.sync_turn("群里别人的话", "答", session_id="s1", messages=msgs("群里别人的话"), turn_author={"id": "stranger-1", "name": "路人", "is_bot": False})
     raw = (w.home / "yuanwei" / "status.json").read_text(encoding="utf-8")

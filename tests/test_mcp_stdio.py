@@ -17,7 +17,7 @@ from helpers2 import TEXTS, organized  # noqa: E402
 from yuanwei import hosts as H  # noqa: E402
 from yuanwei.access import Access  # noqa: E402
 from yuanwei.mcp import server as S  # noqa: E402
-from yuanwei.rules import TOOLS_RULE  # noqa: E402
+from yuanwei import rules as RL  # noqa: E402
 
 SRC = os.path.join(os.path.dirname(__file__), "..", "src")
 
@@ -55,15 +55,18 @@ def pi_setup(tmp_path, texts=None, turn_text=None):
 
 
 # ------------------------------------------------------------------ 工具、说明、基本调用
-def test_pi_server_lists_four_tools_with_rule_and_returns_content_only(tmp_path):
+@pytest.mark.parametrize("mode", ("tools_only", "reminder", "note", "directory"))
+def test_pi_server_lists_four_tools_with_rule_and_returns_content_only(tmp_path, mode):
     mem, acc, handle = pi_setup(tmp_path)
 
     async def go(sess, init):
-        assert init.instructions == TOOLS_RULE
+        assert init.instructions == RL.RULES[mode]
+        assert init.instructions.count(RL.READING_TIPS) == (1 if mode in ("tools_only", "reminder") else 0)
         tools = (await sess.list_tools()).tools
         assert sorted(t.name for t in tools) == ["attachments", "get_messages", "recall", "status"]
         for t in tools:
             assert t.description and t.inputSchema["type"] == "object" and t.meta == {"anthropic/alwaysLoad": True}
+            assert RL.READING_TIPS not in t.description
         assert "remember" not in {t.name for t in tools}
         r = await sess.call_tool("recall", {"query": "吃了什么烤鱼"})
         assert not r.isError and TEXTS[1] in text_of(r) and r.structuredContent is None and len(r.content) == 1
@@ -73,7 +76,7 @@ def test_pi_server_lists_four_tools_with_rule_and_returns_content_only(tmp_path)
         assert "没有找到相关记录" in text_of(r3)
         s = await sess.call_tool("status", {})
         assert not s.isError and "done_steps" in text_of(s) and TEXTS[1] not in text_of(s)
-    with_server(params(tmp_path, "pi", handle), go)
+    with_server(params(tmp_path, "pi", handle, mode=mode), go)
 
 
 def test_model_supplied_identity_args_are_ignored_over_the_wire_and_ban_holds(tmp_path):
@@ -129,6 +132,7 @@ def test_claude_code_server_exposes_only_status_and_refuses_by_name_too(tmp_path
 
     async def go(sess, init):
         assert "暂不支持读取" in init.instructions
+        assert RL.READING_TIPS not in init.instructions
         assert [t.name for t in (await sess.list_tools()).tools] == ["status"]
         for name, a in (("recall", {"query": "烤鱼"}), ("get_messages", {"ids": ["x"]}), ("status", {})):
             r = await sess.call_tool(name, a)
@@ -161,7 +165,11 @@ def test_pi_real_profile_pages_fit_20kb_cover_everything_and_search_only_once(tm
             again = await sess.call_tool("recall", {"cursor": cur})                 # 同一页重取：内容相同
             assert text_of(again) == text_of(r)
         return pages
-    pages = with_server(params(tmp_path, "pi", handle), go)
+    legacy = tmp_path / "legacy.toml"
+    legacy.write_text("recall_ranked_pages = false\n", encoding="utf-8")
+    server = params(tmp_path, "pi", handle)
+    server.args += ["--config", str(legacy)]
+    pages = with_server(server, go)
     assert len(pages) >= 3
     import sqlite3
     c = sqlite3.connect(str(tmp_path / "m.sqlite"))
@@ -220,4 +228,14 @@ def test_forged_request_meta_is_not_an_identity(tmp_path):
         acc.begin_turn("pi", "ps1", "T2")
         late = await sess.call_tool("recall", {"query": "烤鱼"}, meta={"session_id": "somebody-else", "turn_id": "T2", "claudecode/toolUseId": "toolu_y"})
         assert "stale_turn" in text_of(late) and TEXTS[1] not in text_of(late)   # 句柄只证明 T1：伪造的 _meta 说「T2」也换不了这一轮
+    with_server(params(tmp_path, "pi", handle), go)
+
+
+def test_pi_default_rejects_indivisible_oversize_group_over_wire(tmp_path):
+    mem, acc, handle = pi_setup(tmp_path, texts=["中文原话" * 8000])
+    async def go(sess, init):
+        result = await sess.call_tool("recall", {"query": "原话"})
+        assert result.isError and "group_too_large" in text_of(result)
+        assert "get_messages" in text_of(result)
+        assert H.fits(H.profile("pi").paths["mcp_return"], text_of(result))[0]
     with_server(params(tmp_path, "pi", handle), go)

@@ -150,8 +150,8 @@ def test_user_declines_download_nothing_is_downloaded(tmp_path):
     http = FakeHTTP("ollama", models=[])
     pulled = []
     s = mk_sys(http, ollama=ollama_cmds(http, pulled))
-    # 助手、推荐、用DeepSeek、开向量 y、用Ollama y、下载 n → 回到不开；范围、本机、确认
-    io = FakeIO(["1", "1", "y", "y", "y", "y", "n", "1", "y", "y"])
+    # 助手、推荐、用DeepSeek、开向量 y、用Ollama y、下载 n → 回到不开；范围、确认
+    io = FakeIO(["1", "1", "y", "y", "y", "y", "n", "1", "y"])
     assert cli._setup_main(["setup", "--hermes-home", h, "--config-method", "yaml", "--src-path", "/x", "--hermes-python", "/fake/bin/py"], io=io, sys_=s) == 0
     assert pulled == [] and not [r for r in s.ran if "pull" in r] and "不下载，向量就先不开" in io.text and toml_of(h)["retrieval"] == "keyword"
 
@@ -170,7 +170,7 @@ def test_download_happens_only_after_plan_confirmation_and_cancel_downloads_noth
     http = FakeHTTP("ollama", models=[])
     pulled = []
     s = mk_sys(http, ollama=ollama_cmds(http, pulled))
-    io = FakeIO(["1", "1", "y", "y", "y", "y", "y", "1", "y", "n"])     # 同意下载，但计划处不确认
+    io = FakeIO(["1", "1", "y", "y", "y", "y", "y", "1", "n"])     # 同意下载，但计划处不确认
     assert cli._setup_main(["setup", "--hermes-home", h, "--config-method", "yaml", "--src-path", "/x", "--hermes-python", "/fake/bin/py"], io=io, sys_=s) == 1
     assert pulled == [] and "需要下载模型" in io.text and "（你已同意）" in io.text and tree_bytes(h) == {"config.yaml": b"model:\n  default: x\n"}
 
@@ -351,7 +351,7 @@ def test_wizard_declining_numpy_install_turns_vectors_off(tmp_path):
     h = make_home(tmp_path)
     http = FakeHTTP("ollama")
     s = mk_sys(http, ollama=ollama_cmds(http), py=lambda a: (1, "", "ModuleNotFoundError"))
-    io = FakeIO(["1", "1", "y", "y", "y", "y", "n", "1", "y", "y"])     # …用 Ollama（模型在）、装 NumPy n → 关掉
+    io = FakeIO(["1", "1", "y", "y", "y", "y", "n", "1", "y"])     # …用 Ollama（模型在）、装 NumPy n → 关掉
     assert cli._setup_main(["setup", "--hermes-home", h, "--config-method", "yaml", "--src-path", "/x", "--hermes-python", "/fake/bin/py"], io=io, sys_=s) == 0
     assert "向量就关掉" in io.text and toml_of(h)["retrieval"] == "keyword" and not [r for r in s.ran if "pip" in r]
 
@@ -389,7 +389,7 @@ def test_embedding_client_is_built_from_config_in_memory_open_and_in_adapter(tmp
     cp = os.path.join(h, "yuanwei", "yuanwei.toml")
     mem = Memory.open(str(tmp_path / "m.sqlite"), "w", config=Config.load(cp), spawn="off")
     assert isinstance(mem.embed_client, VX.GuardedClient) and mem.embed_client.inner.url == "http://127.0.0.1:11434/v1/embeddings" and mem.vector_fp
-    assert mem.embed_client.inner.timeout == 5
+    assert mem.embed_client.inner.timeout == 10
     from yuanwei.hermes_adapter import HermesAdapter
     cfg = json.load(open(os.path.join(h, "yuanwei", "config.json")))
     a = HermesAdapter(cfg)
@@ -438,3 +438,46 @@ def test_vectors_status_reads_without_changing_anything(tmp_path, capsys):
     assert {k: v for k, v in after.items() if not k.endswith(("-shm", "-wal"))} == {k: v for k, v in before.items() if not k.endswith(("-shm", "-wal"))}
     assert cli._vectors_main(["status", "--check", "--hermes-home", h], io=FakeIO(), sys_=s) == 0
     assert json.loads(capsys.readouterr().out)["check"]["ok"] is True
+
+
+def test_reinstall_same_vector_configuration_preserves_explicit_query_timeout(tmp_path):
+    h = make_home(tmp_path)
+    http = FakeHTTP("ollama")
+    sys_ = mk_sys(http, ollama=ollama_cmds(http))
+    args = setup_args(h, "--vectors", "ollama", "--yes")
+    assert cli._setup_main(args, sys_=sys_) == 0
+    cp = os.path.join(h, "yuanwei", "yuanwei.toml")
+    from pathlib import Path
+    path = Path(cp)
+    path.write_text(path.read_text().replace("timeout_query = 10", "timeout_query = 5"))
+    before = path.read_bytes()
+    assert cli._setup_main(args, sys_=sys_) == 0
+    assert toml_of(h)["embedding"]["timeout_query"] == 5
+    assert path.read_bytes() == before
+
+
+def test_reinstall_without_old_identity_preserves_timeout_in_plan_and_execution(tmp_path, monkeypatch):
+    h = make_home(tmp_path)
+    http = FakeHTTP("ollama")
+    sys_ = mk_sys(http, ollama=ollama_cmds(http))
+    args = setup_args(h, "--vectors", "ollama", "--yes")
+    assert cli._setup_main(args, sys_=sys_) == 0
+    from pathlib import Path
+    path = Path(h) / "yuanwei/yuanwei.toml"
+    original_identity = toml_of(h)["embedding"]["identity"]
+    path.write_text("".join(line for line in path.read_text().splitlines(keepends=True) if not line.startswith("identity =")).replace("timeout_query = 10", "timeout_query = 5"))
+    assert "identity" not in toml_of(h)["embedding"]
+    before = path.read_bytes()
+    calls = []
+    build = WZ.build_toml
+    def capture(*a, **kw):
+        calls.append((a, kw))
+        return build(*a, **kw)
+    monkeypatch.setattr(WZ, "build_toml", capture)
+    # 安装器对已被用户改过且新计划内容不同的文件仍然拒绝覆盖。
+    assert cli._setup_main(args, sys_=sys_) == 2
+    assert any(len(a) == 2 and kw.get("query_timeout") == 5 for a, kw in calls)
+    assert path.read_bytes() == before
+    ch = calls[0][0][0]
+    verified = build(ch, h, original_identity, query_timeout=WZ._preserved_query_timeout(ch, path))
+    assert tomllib.loads(verified)["embedding"]["timeout_query"] == 5

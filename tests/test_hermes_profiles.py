@@ -302,7 +302,7 @@ def test_wizard_declined_plan_leaves_the_copied_library_where_it_is_and_confirme
     default, bot = _copied_bot(tmp_path)
     s = FakeSystem(env={"DEEPSEEK_API_KEY": FAKE_KEY}, commands={"hermes": lambda a: (0, "", "")})
     base = ["setup", "--hermes-home", str(bot), "--config-method", "yaml", "--src-path", "/x"]
-    io = FakeIO(["1", "2", "y", "y", "1", "y", "n"])                                             # 轻量预设走到最后的「确认执行吗」，答 n
+    io = FakeIO(["1", "2", "y", "y", "1", "n"])                                             # 轻量预设走到最后的「确认执行吗」，答 n
     assert cli._setup_main(base, io=io, sys_=s) == 1
     assert "这个机器人目录里有一份从别处复制来的记忆库" in io.text and "不沿用" in io.text and "已取消，什么都没改" in io.text    # 走到了计划、答了不确认
     assert (bot / "yuanwei" / "yuanwei.sqlite").read_bytes() == b"main-hermes-memories" and not [n for n in os.listdir(bot / "yuanwei") if ".copied-from-" in n]

@@ -262,7 +262,7 @@ def test_resent_event_with_a_reused_token_does_not_clear_a_ban_or_open_a_new_tur
     assert acc.current_turn("pi", "S")["gen"] == 1 and acc.current_turn("pi", "S")["refused"] is True
 
 
-def test_auto_fetch_does_not_pile_up_threads_in_one_session_and_late_vector_calls_are_logged(tmp_path, monkeypatch):
+def test_auto_fetch_does_not_pile_up_threads_in_one_session_and_late_vector_calls_are_logged(tmp_path, monkeypatch, calibrated_test_vectors):
     mem, client = hybrid(tmp_path)
     acc = Access(mem)
     r = ModeRunner(mem, acc, H.profile("pi"), ModeConfig(mode="note", auto_timeout_s=0.2))

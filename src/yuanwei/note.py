@@ -11,6 +11,7 @@ from collections import Counter
 from . import encoding as EN
 from . import pack as PK
 from . import rank as RK
+from . import relevance as RL
 from .errors import ConfigError
 from .redact import redact_query
 from .util import est_tokens_line
@@ -83,7 +84,7 @@ def _session_line(row):
 
 
 def _quote_line(row, mp):
-    return "〔%s｜%s〕%s" % (PK.ROLE_CN[row["role"]], row["msg_id"], mp.encode(row["content"]))
+    return RL.quote_prefix(row, PK.ROLE_CN[row["role"]]) + mp.encode(row["content"])
 
 
 def body_lines(rows_sorted, mp):
@@ -115,32 +116,32 @@ def render(chosen_ids, rows_by_id, mp, rule_in_note, hint):
     return "\n".join(lines)
 
 
-def text_tokens(text):
-    return sum(est_tokens_line(x) for x in text.split("\n"))
+def text_tokens(text, ruler=1):
+    return sum(est_tokens_line(x, ruler) for x in text.split("\n"))
 
 
 class NoteMeter:
     """逐条加消息时的估算词元和字符数（不含提示行），最后和「整份渲染出来再数」比，不一样就是装置错误。"""
 
-    def __init__(self, rows_by_id, mp, rule_in_note):
-        self.rows_by_id, self.mp = rows_by_id, mp
+    def __init__(self, rows_by_id, mp, rule_in_note, ruler=1):
+        self.rows_by_id, self.mp, self.ruler = rows_by_id, mp, ruler
         s, e, _ = EN.boundary("x")
         base = head_lines(rule_in_note) + [s, e]
-        self.base_tokens = sum(est_tokens_line(x) for x in base)
+        self.base_tokens = sum(est_tokens_line(x, ruler) for x in base)
         self.base_chars = sum(len(x) for x in base) + len(base) - 1
         self._q, self._s = {}, {}
 
     def _quote(self, mid):
         if mid not in self._q:
             line = _quote_line(self.rows_by_id[mid], self.mp)
-            self._q[mid] = (est_tokens_line(line), len(line) + 1)
+            self._q[mid] = (est_tokens_line(line, self.ruler), len(line) + 1)
         return self._q[mid]
 
     def _session(self, row):
         key = (row["session_id"], row.get("date") or PK.NONE_DATE)
         if key not in self._s:
             line = _session_line(row)
-            self._s[key] = (est_tokens_line(line), len(line) + 1)
+            self._s[key] = (est_tokens_line(line, self.ruler), len(line) + 1)
         return key, self._s[key]
 
     def totals(self, mids):
@@ -159,15 +160,15 @@ class NoteFitter:
     """给 pack_reference 当 selector：按给定次序一条条装，估算词元和字符数两样都不超过这一段的上限；
     整条放不下：stop＝到此为止；skip＝跳过这一条接着往后装。原话里有编码用的替代字符的消息装不了（记在 conflicts 里，不当成「放不下」）。"""
 
-    def __init__(self, caps, oversize, mp, rule_in_note):
-        self.caps, self.oversize, self.mp, self.rule_in_note = caps, oversize, mp, rule_in_note
+    def __init__(self, caps, oversize, mp, rule_in_note, ruler=1):
+        self.caps, self.oversize, self.mp, self.rule_in_note, self.ruler = caps, oversize, mp, rule_in_note, ruler
         self.phase = 0
         self.conflicts, self.skipped, self.stop_at = [], [], None
 
     def __call__(self, seq, rows_by_id, mp, budget):
         tok_cap, char_cap = self.caps[min(self.phase, len(self.caps) - 1)]
         self.phase += 1
-        meter = NoteMeter(rows_by_id, mp, self.rule_in_note)
+        meter = NoteMeter(rows_by_id, mp, self.rule_in_note, self.ruler)
         chosen, stop_at, seen = [], None, set()
         for m, _p, _f in seq:
             if m in seen:
@@ -211,10 +212,11 @@ def analyze(reader, query, cfg, cut=None):
     sidx = PK.SessionIndex(snap.rows)
     tok, chars = cfg.note_tokens, cfg.note_chars
     first_tok, first_chars = tok * FIRST_FRACTION[0] // FIRST_FRACTION[1], chars * FIRST_FRACTION[0] // FIRST_FRACTION[1]
-    fitter = NoteFitter([(first_tok, first_chars), (tok, chars)], cfg.note_oversize, reader.mp, cfg.rule_in_note)
+    fitter = NoteFitter([(first_tok, first_chars), (tok, chars)], cfg.note_oversize, reader.mp, cfg.rule_in_note, cfg.ruler_version)
     pk = PK.pack_reference(hits, sidx, snap.by_id, reader.mp, tmap, m2o, snap.visible, idx.searcher(), query, first_budget=first_tok, total_budget=tok,
-                           nbr=cfg.neighbors, cap=cfg.pool_cap, selector=fitter)
+                           nbr=cfg.neighbors, cap=cfg.pool_cap, selector=fitter, ruler=cfg.ruler_version, provenance=idx.last_provenance if idx.provenance_on else None)
     out["pack"] = pk
+    out["rows_by_id"] = pk["rows_by_id"]
     out["chosen"] = list(pk["最终"]["选中"])
     out["oversize"] = {"mode": cfg.note_oversize, "stop_at": fitter.stop_at, "skipped": list(fitter.skipped), "conflicts": list(fitter.conflicts)}
     return out
@@ -293,7 +295,7 @@ def build_hint(n, state, listed, cursor, any_gate):
 # ================================================================ 套门槛、算提示行、装成便条
 def finalize(an, cfg, tau_kw=None, tau_vec=None, persist=None, max_listed=10):
     """an＝analyze 的结果。tau_*＝None 是关。persist(ordered_u_ids)→游标文字：不给就不存游标（离线测量用，hint 里放同样长的占位）。"""
-    hits, rows_by_id, mp = an["hits"], an["snapshot"].by_id, an["mp"]
+    hits, rows_by_id, mp = an["hits"], an.get("rows_by_id", an["snapshot"].by_id), an["mp"]
     hybrid = an["hybrid"]
     kw_on, vec_on = gate_open(hybrid, tau_kw, tau_vec)
     res = {"gates": {"hybrid": hybrid, "kw_on": kw_on, "vec_on": vec_on, "tau_kw": tau_kw, "tau_vec": tau_vec if hybrid else None},
@@ -327,7 +329,7 @@ def finalize(an, cfg, tau_kw=None, tau_vec=None, persist=None, max_listed=10):
             state = later_state([rows_by_id[m] for m in ordered], disp)
             hint = build_hint(len(ordered), state, ordered[:max_listed], PLACEHOLDER_CURSOR, kw_on or vec_on)
         text = render(chosen, rows_by_id, mp, cfg.rule_in_note, hint)
-        if len(text) <= cfg.note_chars and text_tokens(text) <= cfg.note_tokens:
+        if len(text) <= cfg.note_chars and text_tokens(text, cfg.ruler_version) <= cfg.note_tokens:
             break
         if not chosen:
             raise ConfigError("note_chars／note_tokens 太小：连只有提示行的便条（%d 字符）都放不下" % len(text))
@@ -341,7 +343,7 @@ def finalize(an, cfg, tau_kw=None, tau_vec=None, persist=None, max_listed=10):
         if len(cursor) != len(PLACEHOLDER_CURSOR):
             raise AssertionError("游标长度和占位不同，字符数算不准")
     return dict(res, status="ok", note=text, delivered=sorted(chosen, key=lambda m: rows_by_id[m]["seq"]), delivered_order=chosen, unshown=ordered, unshown_count=len(ordered),
-                listed=ordered[:max_listed], later=state, cursor=cursor, hint=hint, chars=len(text), est_tokens=text_tokens(text), trimmed=trimmed)
+                listed=ordered[:max_listed], later=state, cursor=cursor, hint=hint, chars=len(text), est_tokens=text_tokens(text, cfg.ruler_version), trimmed=trimmed)
 
 
 def make_persist(reader, an):
@@ -349,9 +351,10 @@ def make_persist(reader, an):
     snap = an["snapshot"]
 
     def persist(ordered):
-        chunks = [{"msg_id": m, "session_id": snap.by_id[m]["session_id"], "date": snap.by_id[m]["date"], "role": snap.by_id[m]["role"], "content": snap.by_id[m]["content"],
-                   "fingerprint": snap.by_id[m]["fingerprint"]} for m in ordered]
+        from .reader import _chunk
+        rows = an.get("rows_by_id", snap.by_id)
+        chunks = [_chunk(rows[m]) for m in ordered]
         cid = uuid.uuid4().hex[:16]
-        reader.store.put_cursor(cid, reader.ns, "get_messages", reader.clock() if reader.clock else None, {"cut": snap.cut, "chunks": chunks, "origin": "note", "exclude": sorted(snap.excluded)})
+        reader.store.put_cursor(cid, reader.ns, "get_messages", reader.clock() if reader.clock else None, {"cut": snap.cut, "chunks": chunks, "origin": "note", "relevance_checked": True, "exclude": sorted(snap.excluded), "ruler": reader.cfg.ruler_version})
         return "%s:0:0" % cid
     return persist

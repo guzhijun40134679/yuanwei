@@ -9,13 +9,18 @@ class RetryableNetworkError(Exception):
     """可重试的网络错误：占一次发送，重发时不带拒收理由。judge 抛别的异常算普通出错（model_failed）。"""
 
 
+class BudgetBlocked(Exception):
+    """预算在发出之前挡下了这一次请求（precheck 抛的）：这一次不算已发送、不算付费、不留判断记录，次数不动；这一步停在原地，续跑沿用原来的调用次数和绑定的配置。"""
+
+
 def feedback_text(reasons):
     return "\n\n【上一次输出没有被收下，原因】\n%s\n请改正后重新给出完整的 JSON 对象。" % "\n".join("- " + r for r in reasons)
 
 
-def ask(store, ns, step_id, question, req, task_fp, convert, judge, config, base_seq, k, session_id, fb_builder=None, fb_version=None):
+def ask(store, ns, step_id, question, req, task_fp, convert, judge, config, base_seq, k, session_id, fb_builder=None, fb_version=None, precheck=None):
     """fb_builder(reasons, 上一次的原始输出) → 重问时附的反馈文字；不给＝feedback_text（v1）。fb_version 只在新反馈版本时给，记进请求和判断记录。
-    返回 {"status": "ok"|"failed"|"model_failed", "result": 转换结果, "reused", "no": 通过的那条记录号, "reasons", "error"}。"""
+    precheck(request)：可选，最终请求拼好以后、留判断记录和真正发出之前调一次；它抛 BudgetBlocked 就停在这里，返回 status＝"budget_blocked"（不留记录、不占次数）。
+    返回 {"status": "ok"|"failed"|"model_failed"|"budget_blocked", "result": 转换结果, "reused", "no": 通过的那条记录号, "reasons", "error"}。"""
     recs = store.list_judgments(ns, step_id, question)
     for rec in reversed(recs):
         v = rec.get("validation") or {}
@@ -49,6 +54,11 @@ def ask(store, ns, step_id, question, req, task_fp, convert, judge, config, base
         request["task_fp"] = task_fp
         request["request_fp"] = WC.sha256_hex(request["text"])
         request["step_id"] = step_id
+        if precheck is not None:
+            try:
+                precheck(request)
+            except BudgetBlocked as e:
+                return {"status": "budget_blocked", "result": None, "reused": False, "no": None, "reasons": [], "error": str(e)}
         record = {"task_fp": task_fp, "request_fp": request["request_fp"], "request": request, "feedback": feedback,
                   "status": "requested", "raw_output": None, "validation": None, "error": None,
                   "base_seq": base_seq, "k": k, "step_id": step_id, "session_id": session_id}

@@ -27,6 +27,7 @@ from . import hermes_compat as HC
 from . import hermes_profile as HP
 from . import hermes_workspace as HW
 from . import hosts as H
+from . import owners as OW
 from . import window as WN
 from .access import Access
 from .config import Config
@@ -135,6 +136,11 @@ class HermesAdapter:
         self._prefetched = set()
         self.evidence, self.owner_basis = None, None
         self.recorded_turns, self.skipped = 0, {}
+        self._owner_admitted = False
+        self._ignored_seen = set()                 # 仅内存去重；不持久保存消息、作者或事件定位
+        self._bound_session = None
+        self._deferred_window_switch = None
+        self.owner_counter_errors = 0
         self.mem = self.acc = self.ids = self.runner = None
         self.win = None                       # WindowService（接头用的库里的窗口状态，不按工作区分区）
         self._win_ref = None                  # 当前会话对应的窗口（最近一次映射的结果；状态里给人看）
@@ -233,7 +239,7 @@ class HermesAdapter:
             self.inactive_reason = "agent_context_%s" % ctx
         elif plat == "cron":
             self.inactive_reason = "platform_cron"
-        elif plat in HP.GROUP_ROOM_PLATFORMS:
+        elif self._group_chat():
             self.inactive_reason = HP.GROUP_ROOM                                            # 群聊：明确不记不查（配了 owners 也不放行），不靠「没配主人」碰巧挡住
         else:
             self.inactive_reason = None
@@ -245,13 +251,31 @@ class HermesAdapter:
         if not self.active:
             self._dump_status()
             return
-        self._set_workspace(self._resolve_ws(self._init_kw["cwd"], plat))                  # 宿主没传 cwd、又是 local／tui／desktop：问 Hermes 这一轮的文件夹（桌面版，小问题 28）
-        if self.win is not None:                                                             # 绑定表里有这个号→同一窗口（重启、--resume）；没有→新窗口用默认值（见交回点甲问题 4）
-            try:
-                self._win_ref = self.win.bind_new(HOST, session_id, "", via="initialize")
-            except Exception:                                                                # noqa: BLE001  绑定写不了：没有绑定＝窗口身份待确认，读取被拒，不默认开
-                self._win_ref = None
+        self.ws = self._resolve_ws(self._init_kw["cwd"], plat)
+        # 远程消息到来前不建库、不记窗口绑定：session_id 本身可能包含未登记者的账号。
+        self._owner_admitted = plat in HW.LOCAL_PLATFORMS and self._owner_check(None)[0]
+        if self._owner_admitted:
+            self._prepare_owner_workspace()
         self._dump_status()
+
+    def _group_chat(self):
+        return self.platform in HP.GROUP_ROOM_PLATFORMS or (
+            self.platform not in HW.LOCAL_PLATFORMS
+            and str(self._init_kw.get("chat_type") or "").lower() in ("group", "forum", "channel"))
+
+    def _prepare_owner_workspace(self):
+        """只有本人确认后才创建记忆面和持久窗口绑定。"""
+        if self.mem is None and self.ws["key"] is not None:
+            self._set_workspace(self.ws)
+        if self.win is not None and self._deferred_window_switch is not None:
+            pending, self._deferred_window_switch = self._deferred_window_switch, None
+            self._window_switch(*pending)
+        if self.win is not None and self._bound_session != self.session:
+            try:
+                self._win_ref = self.win.bind_new(HOST, self.session, "", via="initialize")
+                self._bound_session = self.session
+            except Exception:                                                                # noqa: BLE001
+                self._win_ref = None
 
     def _resolve_ws(self, cwd, plat):
         """认工作区：全走 HW.resolve。宿主没传 cwd、平台是 local／tui／desktop（本机平台去掉经典终端，网关聊天平台不问）时，resolve 会问 Hermes 这一轮的文件夹（agent.runtime_cwd / gateway.session_policy，绝不用进程目录）；
@@ -272,7 +296,7 @@ class HermesAdapter:
     # ---------------------------------------------------------------- 主人
     def _owner_check(self, author_id):
         """返回 (是不是主人, 依据或原因)。本机会话就是主人；网关平台要在设置里配 owners。Hermes 的配对／白名单不当主人。"""
-        if self.platform in HP.GROUP_ROOM_PLATFORMS:
+        if self._group_chat():
             return False, HP.GROUP_ROOM                                                         # 群聊：配了 owners 也不放行
         login = self.platform in HW.LOGIN_CHECKED_PLATFORMS and bool(self._init_kw.get("user_id"))     # tui、desktop 带着登录身份（WS 登录）
         if self.platform in HW.LOCAL_PLATFORMS and not login:
@@ -334,34 +358,48 @@ class HermesAdapter:
         if not self.active or self.ws["key"] is None:
             return
         text = message if isinstance(message, str) else ""
-        has_author = "author_is_bot" in kw
-        is_bot = bool(kw.get("author_is_bot"))
-        evidence = "author_fields" if has_author else "legacy_no_author_field"             # 老宿主（0.20.0）整个没有这几个字段，不是「明确写着不是机器人」
+        evidence = "author_fields" if "author_is_bot" in kw else "legacy_no_author_field"
         fp = Access.text_fp(text)
         with self._lock:
             sid = self.session
             self.evidence = evidence
-            token = self.acc.turn_token(HOST, sid, "%s:%s" % (turn_number, fp[:12]))
+            owner, why = (False, "bot_author") if kw.get("author_is_bot") else self._owner_check(kw.get("author_id"))
+            self._owner_admitted = owner
             lst = self._pending.setdefault(sid, [])
-            if any(e["token"] == token for e in lst):                                         # 同一个事件重送：不再造新的一轮
+            if not owner:
+                # 拒绝的事件只在内存配对 sync_turn；不调用会持久写 turn_tokens/审计的 Access。
+                event = (sid, str(turn_number), fp)
+                if event in self._ignored_seen:
+                    return
+                self._ignored_seen.add(event)
+                token = "ignored-" + secrets.token_hex(8)
+                lst.append({"token": token, "number": turn_number, "fp": fp, "admitted": False, "reason": why, "capture": None})
+                self._cur[sid] = token
+                if self.ids is not None:
+                    self.ids.set(HOST, sid, "", token)
+                if self.platform not in HW.LOCAL_PLATFORMS and why in ("owner_unknown", "not_owner"):
+                    try:
+                        if OW.increment(self._home, self.platform) is False:
+                            self.owner_counter_errors += 1
+                    except Exception:                                                        # noqa: BLE001  计数失败不能放行消息
+                        self.owner_counter_errors += 1
+                self._dump_status()
+                return
+            self._prepare_owner_workspace()
+            token = self.acc.turn_token(HOST, sid, "%s:%s" % (turn_number, fp[:12]))
+            if any(e["token"] == token for e in lst):
                 self.ids.set(HOST, sid, "", token)
                 return
-            cap = None
             try:
-                cap = self.mem.store.take_capture()                                          # 事件进来的号：这一轮的用户话和助手回复都带它，删除时用来划边界
-            except Exception:                                                                # noqa: BLE001  取不到（数据库忙）：之后按收到的时间比
+                cap = self.mem.store.take_capture()
+            except Exception:                                                                # noqa: BLE001
                 cap = None
-            owner, why = (False, "bot_author") if is_bot else self._owner_check(kw.get("author_id"))
-            if owner:
-                self.owner_basis = why
-                self.acc.begin_turn(HOST, sid, token, text=text, origin="user")
-            else:
-                self.acc.begin_turn(HOST, sid, token, text=text, origin="unknown")             # 只记一条「来源不明」日志；不开这一轮、不清已有的拒绝、不建立读取许可
-            lst.append({"token": token, "number": turn_number, "fp": fp, "admitted": owner, "reason": None if owner else why, "capture": cap})
+            self.owner_basis = why
+            self.acc.begin_turn(HOST, sid, token, text=text, origin="user")
+            lst.append({"token": token, "number": turn_number, "fp": fp, "admitted": True, "reason": None, "capture": cap})
             self._cur[sid] = token
             self.ids.set(HOST, sid, "", token)
-            if owner:
-                self._window_input(sid, token, turn_number, fp, text, cap, lst[-1])
+            self._window_input(sid, token, turn_number, fp, text, cap, lst[-1])
 
     def _window_input(self, sid, token, turn_number, fp, text, capture=None, entry=None):
         """这一条可信输入的窗口控制（口令、规则识别），在便条、目录、预取看窗口状态之前做完。关闭写失败时窗口进入「没确认已关」，读取被拦住，不说已关。"""
@@ -425,7 +463,7 @@ class HermesAdapter:
         return self._probe["features"][feature]["on"]
 
     def prefetch(self, query, *, session_id="", **kw):
-        if not self.active or self.ws["key"] is None or not self._on("prefetch"):
+        if not self.active or not self._owner_admitted or self.ws["key"] is None or not self._on("prefetch"):
             return ""
         with self._lock:
             sid = session_id or self.session
@@ -491,6 +529,8 @@ class HermesAdapter:
             return self._j("refused", "这次调用属于另一个 Hermes profile，不是这个实例绑定的；没有读取。", "profile_mismatch")
         if self.ws["key"] is None:
             return self._j("refused", "没有认出这个对话属于哪个项目（%s）：这一轮不读也不写，也不会拿「生活」顶上。" % self.ws["reason"], "workspace_unresolved")
+        if not self._owner_admitted:
+            return self._j("refused", "没有确认这条消息来自本人，没有读取或操作记忆。", "turn_unproven")
         args = args if isinstance(args, dict) else {}
         if tool_name in CONTROL_TOOLS:
             return self._control_tool(tool_name)
@@ -500,6 +540,8 @@ class HermesAdapter:
         return self._read_with_permit(tool_name, args, keys)
 
     def _dispatch(self, tool_name, args, keys):
+        if tool_name == "recall" and str(args.get("cursor", "")).startswith("M"):
+            return self._multi(tool_name, args, keys)
         if len(keys) == 1 or tool_name in ("status",) or tool_name not in READ_TOOLS:
             res = self._surfaces[self.ws["key"]].call(tool_name, args)
             return self._j(res.status, res.text, res.reason)
@@ -517,11 +559,21 @@ class HermesAdapter:
                                   tool_name=tool_name, params_fp=pf, scope_set=scope)
         if not c.ok:                                                                         # 认领前窗口变了：不读
             return self._j("refused", "%s。%s" % (self._window_refusal_text("window_closed" if c.reason == "window_closed" else "control_changed", ident)[0], "这个窗口的开关刚刚变了，没有读取。"), "window_changed")
-        out = self._dispatch(tool_name, args, keys)
+        from .cross_recall import DELIVERY_TICKETS
+        delivery_tickets = []
+        binding = DELIVERY_TICKETS.set(delivery_tickets)
+        try:
+            out = self._dispatch(tool_name, args, keys)
+        finally:
+            DELIVERY_TICKETS.reset(binding)
         chk = self.win.verify_before_return(p.secret)
         if chk.deliver:
             return out
-        self.acc.block_after_read(ident, chk.reason)                                         # 已查询、结果挡住：照实记，不说成从没读过
+        for access, ticket in delivery_tickets:
+            access.event(ticket, "blocked_at_return", {"reason": chk.reason})
+            access.event(ticket, "injection_failed", {"reason": chk.reason})
+        if not delivery_tickets:
+            self.acc.block_after_read(ident, chk.reason)                                         # 已查询、结果挡住：照实记，不说成从没读过
         text, reason = self._window_refusal_text("window_closed" if chk.reason == "window_closed" else "control_changed", ident)
         return self._j("refused", text, reason)
 
@@ -590,6 +642,15 @@ class HermesAdapter:
     CURSOR = re.compile(r"(只给 cursor=)(\S+)")
 
     def _multi(self, tool, args, keys):
+        from . import vectors as VX
+        with VX.query_scope():
+            if tool == "recall" and (self.mem.cfg.recall_ranked_pages or str(args.get("cursor", "")).startswith("M")):
+                from . import cross_recall
+                result = cross_recall.execute(self, args, keys)
+                return self._j(result.status, result.text, result.reason)
+            return self._multi_legacy(tool, args, keys)
+
+    def _multi_legacy(self, tool, args, keys):
         order = list(keys)
         cursor = args.get("cursor")
         if tool in ("recall", "get_messages") and isinstance(cursor, str) and cursor:
@@ -605,7 +666,7 @@ class HermesAdapter:
         first = cur.call(tool, dict(args)) if order[0] == self.ws["key"] else None
         if first is not None and first.status in ("refused",):
             return self._j(first.status, first.text, first.reason)                           # 当前这一轮不许读：别的工作区一样不读
-        parts, read, errors = [], [], []
+        parts, read, errors, empty, scanned = [], [], [], [], []
         for i, key in zip(idxs, order):
             sf = self._surfaces.get(key) or self._surface_for(key)
             if sf is None:
@@ -616,13 +677,19 @@ class HermesAdapter:
             if res.status != "ok":
                 errors.append(res)
                 continue
+            scanned.append(self._label(key))
+            if tool == "recall" and res.meta.get("selected_total") == 0:
+                empty.append(self._label(key))
+                continue
             text = self.CURSOR.sub(lambda mm, i=i: "%sW%d~%s" % (mm.group(1), i, mm.group(2)), res.text)
             parts.append("〔工作区：%s〕\n%s" % (self._label(key), text))
             read.append(self._label(key))
         if not parts:
+            if empty and not errors:
+                return self._j("ok", "（没有找到相关记录）")
             e = errors[0] if errors else None
             return self._j(e.status if e else "error", e.text if e else "没有读到。", e.reason if e else None)
-        text = "〔读取范围：%s〕\n" % "、".join(read) + "\n".join(parts)
+        text = "〔读取范围：%s〕\n" % "、".join(scanned) + "\n".join(parts)
         ok, _d = H.fits(H.profile(HOST).paths["mcp_return"], text)
         if not ok:
             while len(parts) > 1 and not H.fits(H.profile(HOST).paths["mcp_return"], "〔读取范围：%s〕\n" % "、".join(read[:len(parts)]) + "\n".join(parts) + "\n（还有 %d 个工作区的结果没放进来，请单独再查）" % (len(read) - len(parts)))[0]:
@@ -731,6 +798,19 @@ class HermesAdapter:
             prev = self.session
             self.session = new_session_id
             moved = not rewound and not reset and reason not in ("compression", "branch")    # 恢复、切到别的会话（含没带 reason、没见过的 reason）
+            trusted_continuation = (reason == "compression" and not reset and not rewound
+                                    and self._owner_admitted and self.mem is not None)
+            if self.platform not in HW.LOCAL_PLATFORMS and not trusted_continuation:
+                # 只有已确认本人的同轮压缩沿用现有许可；其余换号等下一条本人消息。
+                self._owner_admitted = False
+                if moved:
+                    self.ws = {"key": None, "kind": None, "label": None, "reason": "workspace_unknown_after_switch_%s" % (reason or "unknown")}
+                    self._deferred_window_switch = None
+                elif not rewound:
+                    self._deferred_window_switch = (new_session_id, parent_session_id, prev, reset, reason)
+                return
+            if not self._owner_admitted:
+                return
             if moved and self.platform in HW.LOCAL_PLATFORMS:
                 self._rejudge_after_move(kw)                                                   # 本机平台：按 initialize 同一条规则重判，不再一律说不清
             if self.ws["key"] is None:
@@ -787,9 +867,10 @@ class HermesAdapter:
         except Exception:                                                                    # noqa: BLE001
             ref = None
         self._win_ref = ref
+        self._bound_session = new
 
     def on_session_end(self, messages):
-        if not self.active or self.ws["key"] is None:
+        if not self.active or not self._owner_admitted or self.mem is None or self.ws["key"] is None:
             return
         sid, mem = self.session, self.mem
         self._worker.submit(lambda: mem.end_session(HOST, sid))                              # 可能要等数据库、做维护：交给自己的后台线程，不占宿主线程
@@ -798,7 +879,7 @@ class HermesAdapter:
         return ""
 
     def _window_status(self):
-        if self.win is None or not self.session:
+        if self.win is None or not self.session or not self._owner_admitted:
             return None
         try:
             w = self.win.resolve(HOST, self.session, "")
@@ -825,8 +906,9 @@ class HermesAdapter:
             return {"env": None, "source": "unknown", "error": type(e).__name__}
 
     def status(self):
+        counter = OW.count_status(self._home) if self._home else {"counts": {}, "problem": None}
         return {"organizer_key": self._organizer_key(), "active": self.active, "inactive_reason": self.inactive_reason, "inactive_message": self._inactive_message(), "profile": dict(self.profile), "evidence": self.evidence, "owner_basis": self.owner_basis, "recorded_turns": self.recorded_turns,
-                "skipped": dict(self.skipped), "mode": self.cfg.get("mode", "tools_only"), "read_scope": self.scope, "worker_errors": list(self._worker.errors),
+                "skipped": dict(self.skipped), "owner_skips": counter["counts"], "owner_counter_problem": counter["problem"], "owner_counter_errors": self.owner_counter_errors, "mode": self.cfg.get("mode", "tools_only"), "read_scope": self.scope, "worker_errors": list(self._worker.errors),
                 "workspace": {"key": self.ws["key"], "kind": self.ws["kind"], "reason": self.ws["reason"]}, "host_cwd_dropped": self.host_cwd_dropped,
                 "window": self._window_status(), "direct_display": self._display_status(),
                 "compat": {"off": {k: v["reason"] for k, v in self._probe["features"].items() if not v["on"]}, "extra_abstract": list(self._probe["extra_abstract"])}}

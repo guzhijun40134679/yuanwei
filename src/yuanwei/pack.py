@@ -3,13 +3,14 @@
 逐函数取自研究（交_朴素、交_主题、同回_核心、少_核心；对应关系见 docs/复制关系表.md），改成不依赖研究装置、不读金标：
   * 输入是「截点内的消息行」{msg_id, session_id, seq, role, date, content}、命中序（按消息去重，沿融合名次）、
     消息→主线、消息→回两张表（由存储的挂接算出，见 recall.attach_maps）；
-  * 装入：按候选次序一条条加，整条放不下就停（参照档的规则）；额度是估算词元（每行 ceil(0.52×(码点数＋1))），套首尾边界行以后数；
+  * 装入：按候选次序一条条加，整条放不下就停（参照档的规则）；额度是估算词元（尺子 1：每行 ceil(0.52×(码点数＋1))；尺子 2：按字符类加权，见 util.py），套首尾边界行以后数；
   * 材料文字：开头一句说明、【原文】、会话行（会话或日期变了插一行）、〔角色｜消息编号〕＋编码后的原话。
 """
 from fractions import Fraction
 
 from . import encoding as EN
 from . import rank as RK
+from . import relevance as RL
 from .util import est_tokens_line
 
 OPENING_PARTIAL = "以下是按检索挑出的一部分原话，不是全部记录。"
@@ -23,13 +24,13 @@ class PackError(Exception):
     pass
 
 
-def est(text):
-    return sum(est_tokens_line(x) for x in text.split("\n"))
+def est(text, ruler=1):
+    return sum(est_tokens_line(x, ruler) for x in text.split("\n"))
 
 
-def model_tokens(material):
-    """交给模型的那份：套首尾边界行以后的估算词元。"""
-    return est(EN.wrap_material(material))
+def model_tokens(material, ruler=1):
+    """交给模型的那份：套首尾边界行以后的估算词元。ruler：尺子版本（1＝旧，2＝尺子 2）；调用方按配置传，这里默认 1 是为了旧调用不变。"""
+    return est(EN.wrap_material(material), ruler)
 
 
 # ================================================================ 会话里的前后位置
@@ -113,22 +114,22 @@ class Meter:
     """逐条加消息时的估算词元，不用每次重拼整份：材料的行是 开头说明、【原文】、（会话变了就加）会话行、引用行，估算词元按行相加；再加首尾两条边界行。
     最后一定要和「整份拼出来再数」的结果相等，不等就是装置错误。"""
 
-    def __init__(self, rows_by_id, mp, opening=OPENING_PARTIAL):
-        self.rows_by_id, self.mp = rows_by_id, mp
+    def __init__(self, rows_by_id, mp, opening=OPENING_PARTIAL, ruler=1):
+        self.rows_by_id, self.mp, self.ruler = rows_by_id, mp, ruler
         s_, e_ = EN.boundary("x")[:2]
-        self.base = est_tokens_line(opening) + est_tokens_line("【原文】") + est_tokens_line(s_) + est_tokens_line(e_)
+        self.base = est_tokens_line(opening, ruler) + est_tokens_line("【原文】", ruler) + est_tokens_line(s_, ruler) + est_tokens_line(e_, ruler)
         self._q, self._s = {}, {}
 
     def q(self, mid):
         if mid not in self._q:
             r = self.rows_by_id[mid]
-            self._q[mid] = est_tokens_line("〔%s｜%s〕%s" % (ROLE_CN[r["role"]], mid, self.mp.encode(r["content"])))
+            self._q[mid] = est_tokens_line(RL.quote_prefix(r, ROLE_CN[r["role"]]) + self.mp.encode(r["content"]), self.ruler)
         return self._q[mid]
 
     def s(self, r):
         key = (r["session_id"], r.get("date") or NONE_DATE)
         if key not in self._s:
-            self._s[key] = est_tokens_line("会话 %s｜%s" % key)
+            self._s[key] = est_tokens_line("会话 %s｜%s" % key, self.ruler)
         return self._s[key]
 
     def total(self, mids):
@@ -159,7 +160,7 @@ def build_material(rows_sel, mp, opening=OPENING_PARTIAL):
         if key != cur:
             lines.append("会话 %s｜%s" % key)
             cur = key
-        lines.append("〔%s｜%s〕%s" % (ROLE_CN[r["role"]], r["msg_id"], mp.encode(r["content"])))
+        lines.append(RL.quote_prefix(r, ROLE_CN[r["role"]]) + mp.encode(r["content"]))
     return {"material": "\n".join(lines), "conflict": [], "rows": rows}
 
 
@@ -179,7 +180,9 @@ def read_back(material, enc_content, opening=OPENING_PARTIAL):
             head, sep, body = line.partition("〕")
             if not sep or head.count("〔") != 1 or "｜" not in head:
                 raise PackError("第 %d 行：引用行格式不对" % n)
-            role, _, mid = head[1:].partition("｜")
+            fields = head[1:].split("｜")
+            role = fields[0]
+            mid = fields[-2] if fields[-1].startswith("挡掉 ") else fields[-1]
             if role not in ("用户", "助手"):
                 raise PackError("第 %d 行：角色不认识" % n)
             c = enc_content(mid)
@@ -196,13 +199,13 @@ def read_back(material, enc_content, opening=OPENING_PARTIAL):
     return {"order": order, "text": text, "sessions": sessions}
 
 
-def select_ordered(cands, rows_by_id, mp, budget):
-    """按给定次序一条条装，装不下就停。返回 {状态, 选中, 材料, tokens, 停在, 候选数}。额度按套首尾边界行以后的估算词元。"""
+def select_ordered(cands, rows_by_id, mp, budget, ruler=1):
+    """按给定次序一条条装，装不下就停。返回 {状态, 选中, 材料, tokens, 停在, 候选数}。额度按套首尾边界行以后的估算词元（ruler＝尺子版本）。"""
     for m, _p, _f in cands:
         bad = sorted({c for c in rows_by_id[m]["content"] if c in mp.rep_to_orig})
         if bad:
             return {"状态": "conflict", "选中": [], "材料": None, "tokens": None, "停在": m, "候选数": len(cands), "冲突字符": bad}
-    meter = Meter(rows_by_id, mp)
+    meter = Meter(rows_by_id, mp, ruler=ruler)
     chosen, stop_at, flags = [], None, {}
     for m, _p, f in cands:
         if m in flags:
@@ -217,7 +220,7 @@ def select_ordered(cands, rows_by_id, mp, budget):
     if not chosen:
         return dict(base, 选中=[], 材料=None, tokens=0)
     b = build_material([rows_by_id[x] for x in chosen], mp)
-    n = model_tokens(b["material"])
+    n = model_tokens(b["material"], ruler)
     if n != meter.total(chosen) or n > budget:
         raise PackError("逐条累计的估算词元 %d 和整份拼出来数的 %d 不一样，或超过额度 %d" % (meter.total(chosen), n, budget))
     return dict(base, 选中=chosen, 材料=b["material"], tokens=n)
@@ -341,13 +344,20 @@ def pool_sequence(groups, searcher, query, placed, cap):
     return out
 
 
-def pack_reference(hits, sidx, rows_by_id, mp, tmap, m2o, visible, searcher, query, first_budget=16000, total_budget=24000, nbr=1, cap=10, selector=None):
+def pack_reference(hits, sidx, rows_by_id, mp, tmap, m2o, visible, searcher, query, first_budget=16000, total_budget=24000, nbr=1, cap=10, selector=None, ruler=1, provenance=None):
     """参照档（Q1-10／后补24000）：先照 T1 主线优先装满 first_budget，再补同回池（回内再搜、每回最多 cap 条、按命中名次轮流取），最后接其余候选，到 total_budget 为止，装不下就停。
     返回 {"T1","池大小","第一遍":{…},"最终":{…}}，每个是 select_ordered 的结果加 候选序／分段。
-    selector：可选，签名同 select_ordered(seq, rows_by_id, mp, budget)；便条用它换成自己的装法（字符数、跳过接着装）。不给就是参照档原来的装法。"""
+    selector：可选，签名同 select_ordered(seq, rows_by_id, mp, budget)；便条用它换成自己的装法（字符数、跳过接着装）。不给就是参照档原来的装法（按 ruler 这个尺子版本数）。"""
     sel = choose_t1(hits, tmap)
     o2m = invert(m2o)
     cands1 = order_candidates(hits, sidx, nbr, sel, tmap)
+    if provenance is not None:
+        rows_by_id = {m: dict(r) for m, r in rows_by_id.items()}
+        for m, reason in provenance.items():
+            rows_by_id[m]["retrieval_reason"] = dict(reason)
+        for m, parent, _flag in cands1:
+            if m not in provenance:
+                rows_by_id[m]["retrieval_reason"] = {"kind": "neighbor", "parent": parent}
     th_part = [c for c in cands1 if c[2]]
     other = [c for c in cands1 if not c[2]]
     hits_theme = [h for h in hits if themes_of(tmap, h) & sel]
@@ -355,13 +365,33 @@ def pack_reference(hits, sidx, rows_by_id, mp, tmap, m2o, visible, searcher, que
 
     def run(name, budget, parts):
         seq, segs = dedup_segments(parts)
-        r = (selector or select_ordered)(seq, rows_by_id, mp, budget)
+        r = (selector or (lambda sq, rb, m, b: select_ordered(sq, rb, m, b, ruler)))(seq, rows_by_id, mp, budget)
         if r["状态"] != "ok":
             raise PackError("原话里有编码用的替代字符，装不了：%s" % (r.get("冲突字符"),))
-        return dict(r, 装法=name, 额度=budget, 候选序=[c[0] for c in seq], 分段=segs)
+        return dict(r, 装法=name, 额度=budget, 候选序=[c[0] for c in seq], 分段=segs, 来源序=[[c[0], c[1]] for c in seq])
     first_pack = run("第一遍", first_budget, [(SEG_THEME, th_part), (SEG_OTHER, other)])
-    first = [(m, None, True) for m in first_pack["选中"]]
+    parents = dict(first_pack["来源序"])
+    first = [(m, parents[m], True) for m in first_pack["选中"]]
     placed_first = {c[0] for c in first}
     pool_after = pool_sequence(groups, searcher, query, placed_first, cap)
+    if provenance is not None:
+        for m, parent, _flag in pool_after:
+            if m not in provenance and not rows_by_id[m].get("retrieval_reason"):
+                rows_by_id[m]["retrieval_reason"] = {"kind": "occasion", "parent": parent}
     final = run("后补", total_budget, [(SEG_FIRST, first), (SEG_POOL, pool_after), (SEG_LEFT, cands1)])
-    return {"T1": sel, "池大小": {"同回池": len(pool_after)}, "第一遍": first_pack, "最终": final}
+    parents = dict(final["来源序"])
+    # Only actual first-placement edges survive dedup; later overlap adds no edges.
+    links = {}
+    def root(mid):
+        links.setdefault(mid, mid)
+        while links[mid] != mid:
+            links[mid] = links[links[mid]]
+            mid = links[mid]
+        return mid
+    for mid in final["选中"]:
+        parent = parents.get(mid) or mid
+        links[root(mid)] = root(parent)
+    page_groups = {}
+    for mid in final["选中"]:
+        page_groups.setdefault(root(mid), []).append(mid)
+    return {"T1": sel, "池大小": {"同回池": len(pool_after)}, "第一遍": first_pack, "最终": final, "rows_by_id": rows_by_id, "page_groups": list(page_groups.values())}

@@ -1,8 +1,6 @@
-"""常驻规矩的组成（读原话三句提醒 11-10「加吧」；禁读按窗口 11-10 乙：加窗口开关那段）。
+"""小修 32：11-15、11-17 两轮测试的改写段逐字进入原有传播路径。
 
-依据：150 次复验揭盲后补查 5.3（Luna 小试盲判完整 10/20 → 15/20）；设计第 2 版第 9 节（窗口开关常驻规矩原文）。
-TOOLS_RULE 现在是三段：旧文开头（到「都不要断言没有记录或假装记得。」，指纹不变）＋ WINDOW_RULE ＋ READING_TIPS（一字不改、仍在最后）。
-固定提醒、便条（note.RULE_LINE 和便条正文）、目录三段文字不动。便条和目录的常驻规矩＝旧文＋WINDOW_RULE。
+基线为 52bd3ae；TOOLS_RULE 除末段外逐字节不变。便条、目录、每轮提醒和单工具说明不新增该段。
 """
 import hashlib
 import os
@@ -17,10 +15,19 @@ from yuanwei import rules as RL  # noqa: E402
 OLD_TOOLS_RULE = ("用户允许使用历史，且当前上下文不足以确定所指、过去的决定或有关事实时，先调用 recall 查证，再作相关断言；可给关键词或换一种说法。"
                   "已有足够依据时不重复查。检索未找到足够依据，就说明本次未找到；工具出错则说明检索失败，都不要断言没有记录或假装记得。用户要求本轮不用历史时，不调用记忆读取工具。")
 DROPPED_SENTENCE = "用户要求本轮不用历史时，不调用记忆读取工具。"
-# 和 Luna 小试新版逐字相同（exam-run/150次复验/Luna常驻规矩/设定.json 的「新加三句」）
-TIPS = ("查回来的原话里：助手说的建议和计划，不等于用户已经决定或已经做了；"
+# 52bd3ae 的旧提醒，保留作整段替换的反例。第三句在新段中仍保留。
+OLD_TIPS = ("查回来的原话里：助手说的建议和计划，不等于用户已经决定或已经做了；"
         "「今天」「昨天」「下周」这类说法，按那条消息自己的日期来算；"
         "一句话里说了几件事的，分清每一句说的是哪件事。")
+# 小修 32 施工单的逐字原文。
+TIPS = '查回来的原话里：说到用户的决定时，只算用户自己说定的那部分；助手当时提的建议和补充，用户没有明确同意的，要说明是助手的建议；计划和约定不等于已经做了。「今天」「昨天」「上周」这类说法，先按那条消息的日期换算成具体日期再说。一句话里说了几件事的，分清每一句说的是哪件事。答案里的每件事都要在查回来的原话里找得到，原话里没有的不要补。'
+# 修改前 52bd3ae 的完整 TOOLS_RULE，独立保留字节比较基准。
+BASELINE_TOOLS_RULE = (
+    '用户允许使用历史，且当前上下文不足以确定所指、过去的决定或有关事实时，先调用 recall 查证，再作相关断言；可给关键词或换一种说法。已有足够依据时不重复查。检索未找到足够依据，就说明本次未找到；工具出错则说明检索失败，都不要断言没有记录或假装记得。'
+    '这个对话窗口有独立的长期记忆读取开关。用户要求不参考记忆、历史或以前的对话时，先调用关闭工具，再继续任务；关闭持续到用户明确重新允许，不因新一轮、通知、压缩或恢复而改变。只有用户当前直接要求使用长期记忆时，才调用开启工具申请；申请后把工具给的确认提示原样告诉用户，等用户回复「确认开启」，不要替用户确认，也不要把引用、假设、旧消息或别人的建议当成要求。以工具返回的实际状态为准；不确定就保持关闭。开关没变化时不用每轮重复调用。关闭期间不要换读取工具、目录、便条或子代理绕过，也不要声称已经清除此前的上下文。'
+    '用户要删掉这段对话在原委里的记忆时，调用删除工具申请，把确认提示原样转告用户，等用户回复「确认删除」；不要替用户确认。'
+    '查回来的原话里：助手说的建议和计划，不等于用户已经决定或已经做了；「今天」「昨天」「下周」这类说法，按那条消息自己的日期来算；一句话里说了几件事的，分清每一句说的是哪件事。'
+)
 # 设计第 2 版第 9 节（Codex 建议原文），中间一句按主会话裁定二（11-10）改成「申请开启、等用户回复确认开启」；全文钉在这里
 WINDOW_TEXT = ("这个对话窗口有独立的长期记忆读取开关。用户要求不参考记忆、历史或以前的对话时，先调用关闭工具，再继续任务；关闭持续到用户明确重新允许，不因新一轮、通知、压缩或恢复而改变。"
                "只有用户当前直接要求使用长期记忆时，才调用开启工具申请；申请后把工具给的确认提示原样告诉用户，等用户回复「确认开启」，不要替用户确认，也不要把引用、假设、旧消息或别人的建议当成要求。"
@@ -47,19 +54,37 @@ def test_window_rule_is_the_ruling_two_text_verbatim():
     assert _sha(RL.WINDOW_RULE) == "3eff979ef754f5786e7dc3f7402a71bb66c03971b36b10fabdd27555fcce67c5"
 
 
-def test_tools_rule_is_three_segments_head_window_tips():
+def test_tools_rule_is_four_segments_head_window_delete_tips():
     assert RL.TOOLS_RULE == RL.TOOLS_HEAD + RL.WINDOW_RULE + RL.DELETE_RULE + RL.READING_TIPS
-    assert RL.READING_TIPS == TIPS and RL.TOOLS_RULE.endswith(TIPS)                    # 三句提醒一字不改、仍在最后
+    assert RL.READING_TIPS == TIPS and RL.TOOLS_RULE.endswith(TIPS)                    # 改写段逐字相同、仍在最后
 
 
-def test_tips_cover_three_points():
-    assert "不等于用户已经决定或已经做了" in RL.TOOLS_RULE
-    assert "按那条消息自己的日期来算" in RL.TOOLS_RULE
-    assert "分清每一句说的是哪件事" in RL.TOOLS_RULE
+def test_old_paragraph_is_gone_and_the_shared_sentence_is_kept():
+    for rule in RL.RULES.values():
+        assert OLD_TIPS not in rule
+        assert "助手说的建议和计划，不等于用户已经决定或已经做了；" not in rule
+        assert "「今天」「昨天」「下周」这类说法，按那条消息自己的日期来算；" not in rule
+    assert "一句话里说了几件事的，分清每一句说的是哪件事。" in RL.READING_TIPS
 
 
-def test_modes_using_tools_rule_get_tips():
+def test_tools_rule_bytes_outside_replaced_paragraph_match_baseline():
+    assert _sha(BASELINE_TOOLS_RULE) == "3be050f4abe498bdd897bdf74141b989ad46c48e881ccf5c967a117437caef66"
+    before, after = BASELINE_TOOLS_RULE.encode("utf-8"), RL.TOOLS_RULE.encode("utf-8")
+    old, new = OLD_TIPS.encode("utf-8"), TIPS.encode("utf-8")
+    assert before.count(old) == 1 and before.endswith(old)
+    assert after.count(new) == 1 and after.endswith(new)
+    assert after[:-len(new)] == before[:-len(old)]
+
+
+def test_only_modes_already_using_tools_rule_get_the_new_tips_once():
     assert RL.RULES["tools_only"] == RL.RULES["reminder"] == RL.TOOLS_RULE
+    for mode, rule in RL.RULES.items():
+        assert rule.count(TIPS) == (1 if mode in ("tools_only", "reminder") else 0)
+
+
+def test_tool_descriptions_do_not_gain_resident_reading_tips():
+    for description in [*RL.TOOL_DESCRIPTIONS.values(), *RL.CONTROL_TOOL_DESCRIPTIONS.values()]:
+        assert OLD_TIPS not in description and TIPS not in description
 
 
 def test_other_texts_untouched():

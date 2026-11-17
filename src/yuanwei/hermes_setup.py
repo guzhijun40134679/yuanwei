@@ -378,6 +378,8 @@ def plan_install(hermes_home, db=None, mode="tools_only", src_path=None, replace
             if cfgp.exists():
                 backups.append(str(cfgp) + ".yuanwei-backup-<时间>")
     notes = ["装好以后要重启 Hermes，新的记忆提供者才会加载。", "只改 config.yaml 里 memory.provider 这一行；原来的值记在 install.json，卸载时还原。", "不改 CLAUDE.md、AGENTS.md、SOUL.md 一类常驻说明文件；常驻规矩由插件的 system_prompt_block 提供（默认开，config.json 的 resident_rule 可关）。"]
+    from . import owner_diagnostics as OD
+    notes.extend(OD.status(hermes_home, owners=owners)["notes"])
     pname = HP.profile_name(hermes_home)
     if pname:
         notes.insert(0, "这是给机器人 %s 装：它会有自己单独的一个库（%s），和主 Hermes、别的机器人互不相干。这一版只管你和这个机器人的一对一，群聊和机器人之间互发的消息不记也不查。" % (pname, db))
@@ -547,12 +549,13 @@ def apply_uninstall(hermes_home, host_reloaded=False, dry_run=False, hermes_cmd=
             p.unlink()
         steps.append({"step": "delete:" + rel, "status": "would_delete" if dry_run else "deleted"})
         changed = True
-    st_file = h / "yuanwei" / "status.json"                                              # 运行时留下的数（只有数和原因）：是我们写的，删；记忆库、工作区名字不是装的东西，不动
-    if st_file.exists() and not kept:
-        if not dry_run:
-            st_file.unlink()
-        steps.append({"step": "delete:yuanwei/status.json", "status": "would_delete" if dry_run else "deleted"})
-        changed = True
+    for name in ("status.json", "owner-skips.json", "owner-skips.lock"):
+        st_file = h / "yuanwei" / name                                               # 原委运行计数；只在宿主重载后删，不动库和工作区名字
+        if st_file.exists() and not kept:
+            if not dry_run:
+                st_file.unlink()
+            steps.append({"step": "delete:yuanwei/" + name, "status": "would_delete" if dry_run else "deleted"})
+            changed = True
     if not dry_run and not kept:
         for d in (h / "plugins/yuanwei", h / "yuanwei"):
             try:
@@ -718,6 +721,18 @@ def install_status(hermes_home, sys_=None, hermes_python=None):
         except (OSError, ValueError):
             notes.append("config.json 读不了")
     out["config"] = cfg
+    from . import relevance_diagnostics as RDG
+    out["relevance"] = RDG.installed(str(h))
+    timeout_note = out["relevance"].get("query_timeout", {}).get("advisory")
+    if timeout_note:
+        notes.append(timeout_note)
+    if out["relevance"]["status"] in ("uncalibrated", "invalid_identity", "unavailable"):
+        notes.append(out["relevance"]["message"])
+        if out["relevance"].get("recommendation"):
+            notes.append(out["relevance"]["recommendation"])
+    from . import owner_diagnostics as OD
+    out["chat_owners"] = OD.status(str(h), env=sys_.env if sys_ is not None else None)
+    notes.extend(out["chat_owners"]["notes"])
     if cpath:
         try:
             _status_extra(out, h, cpath, cfg.get("db"), notes)

@@ -233,8 +233,10 @@ def test_multi_workspace_materials_say_where_each_comes_from_and_the_receipt_lis
 def test_multi_workspace_get_messages_and_cursor_route_to_the_right_workspace(tmp_path):
     w = World(tmp_path, scope="all_open")
     life = w.adapter("/elsewhere")
+    life.cfg["recall_ranked_pages"] = False  # Explicit legacy W-prefixed split-cursor contract.
     life.cfg["recall_page_chars"] = 50
     for m in w.mems.values():
+        m.cfg.recall_ranked_pages = False
         m.cfg.recall_page_chars = 60
     turn(life, 1, "普通")
     first = call(life, "recall", {"query": "咖喱 发布会 数据库 土豆 演示稿 蓝绿"})["text"]
@@ -243,7 +245,7 @@ def test_multi_workspace_get_messages_and_cursor_route_to_the_right_workspace(tm
     assert cursors and all(c.startswith("W") and "~" in c for c in cursors)                              # 游标带着工作区前缀
     nxt = call(life, "recall", {"cursor": cursors[0]})
     assert nxt["status"] == "ok"
-    ids = re.findall(r"〔[^｜〕]+｜([^〕]+)〕", first)
+    ids = re.findall(r"〔[^〕]+｜(m-[a-f0-9]+)〕", first)
     got = call(life, "get_messages", {"ids": ids[:3]})
     assert got["status"] == "ok" and "〔工作区：" in got["text"]
 
@@ -310,18 +312,18 @@ def test_gateway_platform_without_a_configured_owner_is_unknown_not_owner(tmp_pa
     assert rows(w.mem("life")) == [] and a.status()["skipped"] == {"owner_unknown": 1}
 
 
-def test_gateway_owner_recorded_stranger_and_other_real_people_in_a_group_are_not(tmp_path):
+def test_gateway_owner_recorded_stranger_and_other_real_people_are_not(tmp_path):
     w = World(tmp_path, owners={"telegram": ["u-owner"]})
-    a = w.adapter(None, platform="telegram", user_id="u-owner", chat_type="group")
-    turn(a, 1, "主人在群里说的", author_id="u-owner", author_name="主人")
+    a = w.adapter(None, platform="telegram", user_id="u-owner", chat_type="dm")
+    turn(a, 1, "主人在私信说的", author_id="u-owner", author_name="主人")
     assert call(a, "recall", {"query": "咖喱"})["status"] == "ok"
-    a.sync_turn("主人在群里说的", "答", session_id="s1", messages=msgs("主人在群里说的"), turn_author={"id": "u-owner", "name": "主人", "is_bot": False})
-    turn(a, 2, "群里另一个真人说的", author_id="u-friend", author_name="朋友")
+    a.sync_turn("主人在私信说的", "答", session_id="s1", messages=msgs("主人在私信说的"), turn_author={"id": "u-owner", "name": "主人", "is_bot": False})
+    turn(a, 2, "另一个真人说的", author_id="u-friend", author_name="朋友")
     assert call(a, "recall", {"query": "咖喱"})["status"] == "refused"
-    a.sync_turn("群里另一个真人说的", "答", session_id="s1", messages=msgs("群里另一个真人说的"), turn_author={"id": "u-friend", "name": "朋友", "is_bot": False})
+    a.sync_turn("另一个真人说的", "答", session_id="s1", messages=msgs("另一个真人说的"), turn_author={"id": "u-friend", "name": "朋友", "is_bot": False})
     turn(a, 3, "陌生人私信", author_id="u-stranger")
     a.sync_turn("陌生人私信", "答", session_id="s1", messages=msgs("陌生人私信"))
-    assert [t for r, t in rows(w.mem("life")) if r == "user"] == ["主人在群里说的"] and a.status()["skipped"] == {"not_owner": 2}
+    assert [t for r, t in rows(w.mem("life")) if r == "user"] == ["主人在私信说的"] and a.status()["skipped"] == {"not_owner": 2}
     turn(a, 4, "主人又说", author_id="u-owner")
     assert call(a, "recall", {"query": "咖喱"})["status"] == "ok"                                      # 别人的轮次没有把主人的许可冲掉也没有借走
 
