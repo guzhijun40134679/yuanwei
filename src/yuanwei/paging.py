@@ -64,7 +64,7 @@ def _recall_page(reader, d, cid, pos, off, path):
         final = text + _tail("recall", cut, len(delivered), cursor, first_page, False)
         ok, _d = H.fits(path, final)
         return ok, {"text": final, "delivered": delivered, "cursor": cursor}
-    return _search_page(attempt, reader.cfg.recall_page_chars)
+    return _search_page(attempt, reader.cfg.page_chars_cap())
 
 
 def recall_first(reader, query, keywords, budget, path, on_search=None, first_suffix=""):
@@ -82,6 +82,10 @@ def recall_first(reader, query, keywords, budget, path, on_search=None, first_su
     chunks = [_chunk(r) for r in sel["selected"]]
     stats = sel["stats"]
     if not chunks:
+        from . import ranked_pages as RP
+        err = RP.oversize_empty(reader, sel)
+        if err is not None:
+            raise err
         text = NO_HITS + "\n\n——yuanwei｜截点 %s｜没有命中的原话" % CU.label(snap.cut)
         ok, _d = H.fits(path, text)
         if not ok:

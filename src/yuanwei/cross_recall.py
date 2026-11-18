@@ -125,12 +125,13 @@ def execute(adapter, args, keys):
                     source["data"], source["cursor_id"] = local["data"], ref["cursor_id"]
             else:
                 cid, number = uuid.uuid4().hex[:16], 0
-                refs, suffix = [], ""
+                refs, suffix, oversize = [], "", []
                 for source in sources:
                     reader, selection, query, queries, suffix = source["surface"].prepare_ranked_selection(source["ticket"], args)
                     if not reader.cfg.recall_ranked_pages:
                         raise BadCursor("来源工作区的分页配置不一致，请重新查")
                     local = RP.selection_data(reader, selection, path=path, query=query, queries=queries)
+                    oversize.append(RP.oversize_empty(reader, selection))
                     local_id = uuid.uuid4().hex[:16]
                     reader.store.put_cursor(local_id, reader.ns, "recall_source", reader.clock() if reader.clock else None, local)
                     source.update(reader=reader, data=local, cursor_id=local_id)
@@ -142,6 +143,9 @@ def execute(adapter, args, keys):
                         if rank < len(source["data"]["groups"]):
                             groups.append([[index, i] for i in source["data"]["groups"][rank]])
                 if not groups:
+                    err = next((e for e in oversize if e is not None), None)
+                    if err is not None:
+                        raise err                                              # 所有工作区都没装进材料，而其中有相关内容只是单条太长：明确说，不回「没找到」
                     # 没有任何材料；不创建聚合续页，也不产生无关工作区提示。
                     text = "（没有找到相关记录）"
                     data["pages"] = []
@@ -150,7 +154,7 @@ def execute(adapter, args, keys):
                         return denied
                     if suffix:
                         text += "\n" + suffix
-                    if len(text) > data["page_limit"] or not H.fits(path, text)[0]:
+                    if not RP.within(data, text) or not H.fits(path, text)[0]:
                         from .paging import ReturnTooLarge
                         raise ReturnTooLarge("空结果说明也超过显示上限")
                     first = next((s for s in sources if s["key"] == adapter.ws["key"]), sources[0])
@@ -166,14 +170,14 @@ def execute(adapter, args, keys):
                         delivery_tickets.extend(tickets)
                     return result
                 data["pages"] = RP.make_plan(groups, lambda items, page, more: _render(adapter, sources, data, items, page, "M%s:%d:0" % (cid, page + 1) if more else None)[0],
-                                              lambda text: len(text) <= data["page_limit"] and H.fits(path, text)[0])
+                                              lambda text: RP.within(data, text) and H.fits(path, text)[0])
                 owner.mem.store.put_cursor(cid, owner.mem.ns, "recall_multi", owner.mem.clock(), data)
             denied = _check_sources(sources, data, number)
             if denied:
                 return denied
             next_token = "M%s:%d:0" % (cid, number + 1) if number + 1 < len(data["pages"]) else None
             text, local_texts, delivered = _render(adapter, sources, data, data["pages"][number], number, next_token)
-            if len(text) > data["page_limit"] or not H.fits(path, text)[0]:
+            if not RP.within(data, text) or not H.fits(path, text)[0]:
                 raise RP.GroupTooLarge("固定页计划已不能满足上限，请重新查或按消息编号读取")
             tickets, deliveries = [], []
             for index, local_text in local_texts.items():

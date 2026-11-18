@@ -54,6 +54,13 @@ def fits(path, text):
     return ok, detail
 
 
+def char_cap(path):
+    """这条路径里「按字符数」的限制（cp、utf16）折成可用的字符数上限（阈值减预留的包装开销）；没有这类限制返回 None。
+    字符数不会大于这两种单位的计数（utf16 里增补平面字符算 2），所以文字的 len 不超过它就不会先被这两个单位拒绝；字节、词元类的限制照旧靠 fits 核。"""
+    caps = [l.threshold - path.overhead.get(l.unit, 0) for l in path.limits if l.unit in ("cp", "utf16")]
+    return min(caps) if caps else None
+
+
 def codex_required_limit(chars=8000, wrapper_chars=0):
     """Codex 钩子 additionalContextLimit 至少要设多大，才保证任意 chars 个字符（含我们自己包的 wrapper_chars 个字符）不被存成文件：
     UTF-8 每字符最多 4 字节，÷4 向上取整，每字符最多 1 个估算词元。"""
@@ -73,6 +80,12 @@ class HostProfile:
     def tools_opened(self):
         """记忆读取工具开不开放：拿不到可信身份链的宿主不开放。"""
         return self.identity != "unproven"
+
+    def with_hook_chars(self, chars):
+        """返回一份把 hook_context 路径的字符上限（cp）换成 chars 的副本（只有 Hermes 用：见 hermes_compat.prefetch_limit，按用户的 Hermes 设置定）。"""
+        old = self.paths["hook_context"]
+        new = dataclasses.replace(old, limits=(Limit("cp", int(chars), old.limits[0].on_exceed),))
+        return dataclasses.replace(self, paths=dict(self.paths, hook_context=new))
 
     def configured(self, codex_hook_limit=None):
         """返回一份改了配置的副本（原对象不变）。目前只有 Codex 的钩子上限可调（装接头时写进 additionalContextLimit）。"""
@@ -111,6 +124,11 @@ PROFILES = {
         "记忆插件 initialize 的 agent_context（primary／subagent／cron／flush）、on_turn_start 的 author_is_bot；只收 primary 且不是机器人的用户回合",
         {"mcp_return": Path("mcp_return", (Limit("cp", 50000, "MCP 文本硬顶 2,000,000 字符；『预算层 50K 落盘阈值』的规则未核，保守取 50,000"),),
                             _MCP_OVH, False, "宿主资料 §4.1（50K 规则未核）"),
+         # 注：我们的 Hermes 接头走记忆插件的 prefetch，便条交出去的就是预取文字。这里的 10,000 只是读不到用户的 Hermes 设置时的保守默认值；
+         # 真正的上限在 Hermes 进程里按它自己的读法定（hermes_compat.prefetch_limit，HostProfile.with_hook_chars 套上去）：
+         #   Hermes 源码 agent/memory_manager.py 第 292–299 行（主会话 2026-11-18 只读核过）：外部记忆插件的预取，默认（memory.prefetch_spill_enabled 没开）上限是
+         #   max(hooks.output_spill.max_chars × 10, 100_000) 字符；开了才按 hooks.output_spill.max_chars 截（默认 10,000，tools/hook_output_spill.py 的 DEFAULT_MAX_CHARS），
+         #   截法是存成文件、对话里只留头尾各 500 字符。更早的宿主资料 §4.2 记着同样的事（那时标的行号是 memory_manager.py:453-462）。
          "hook_context": Path("hook_context", (Limit("cp", 10000, "pre_llm_call 每个钩子超过 hooks.output_spill.max_chars（默认 10,000 字符）落盘；记忆预取默认不落盘但可开"),),
                               _HOOK_OVH, False, "宿主资料 §4.2、§4.3（本机源码 HA:tools/hook_output_spill.py:24-27，未在运行中的 Hermes 上实测）")},
         "读取工具由记忆插件自带（handle_tool_call 不带会话和轮次，靠插件实例里的状态）；静态 MCP 登记同样拿不到身份"),

@@ -200,13 +200,22 @@ class HermesAdapter:
         self.ids = InProcessIdentity()
         prof = H.profile(HOST)
         self._surfaces = {ws["key"]: ToolSurface(self.mem, self.acc, prof, self.ids)}
-        self.runner = ModeRunner(self.mem, self.acc, prof, ModeConfig(mode=self.cfg.get("mode", "tools_only")))
+        self.runner = ModeRunner(self.mem, self.acc, self._runner_profile(prof), ModeConfig(mode=self.cfg.get("mode", "tools_only")))
         self.ids.set(HOST, self.session, "", None)
         dflt = self.cfg.get("window_default", "on")
         self.win = WN.WindowService(self.mem.store, clock=self.mem.clock, default_state=dflt if dflt in ("on", "off") else "off", settings=self._setting_block)   # 默认值认不得：按最严（关）
         from .deletion import DeletionService
         self.win.deleter = DeletionService(self.mem.db_path, store=self.mem.store, config_dir=self.mem.config_dir, clock=self.mem.clock)
         self.acc.windows = self.win
+
+    def prefetch_limit(self):
+        """便条（预取）的字符上限：照用户的 Hermes 设置读一次、记住；读不到退回保守的 10,000，不影响插件加载。"""
+        if getattr(self, "_prefetch_limit", None) is None:
+            self._prefetch_limit = HC.prefetch_limit()
+        return self._prefetch_limit
+
+    def _runner_profile(self, prof):
+        return prof.with_hook_chars(self.prefetch_limit()["chars"])
 
     def _setting_block(self, host, session_id):
         """被哪条设置挡住（设置优先，自然语言打不开设置）：workspace｜session｜None。"""
@@ -911,4 +920,4 @@ class HermesAdapter:
                 "skipped": dict(self.skipped), "owner_skips": counter["counts"], "owner_counter_problem": counter["problem"], "owner_counter_errors": self.owner_counter_errors, "mode": self.cfg.get("mode", "tools_only"), "read_scope": self.scope, "worker_errors": list(self._worker.errors),
                 "workspace": {"key": self.ws["key"], "kind": self.ws["kind"], "reason": self.ws["reason"]}, "host_cwd_dropped": self.host_cwd_dropped,
                 "window": self._window_status(), "direct_display": self._display_status(),
-                "compat": {"off": {k: v["reason"] for k, v in self._probe["features"].items() if not v["on"]}, "extra_abstract": list(self._probe["extra_abstract"])}}
+                "compat": {"off": {k: v["reason"] for k, v in self._probe["features"].items() if not v["on"]}, "extra_abstract": list(self._probe["extra_abstract"])}, "prefetch_limit": dict(self.prefetch_limit())}

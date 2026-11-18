@@ -139,7 +139,12 @@ class MemoryManager:
         schemas = list(provider.get_tool_schemas())
         self._providers.append(provider)
     def initialize_for_agent(self, **kwargs): ...
+    def _prefetch_limit(self, cfg):
+        out = cfg["hooks"]["output_spill"]["max_chars"]
+        return out if cfg["memory"].get("prefetch_spill_enabled") else max(out * 10, 100_000)
 '''
+HOOK_SPILL = "DEFAULT_MAX_CHARS = 10_000\n"
+HERMES_CONFIG = "def load_config():\n    return {}\n"
 AGENT_INIT += '''
 
 def build(agent, mp, platform):
@@ -193,7 +198,7 @@ def enabled_member_dirs():
 '''
 FILES = {"pm/plugin_declarations.py": PM_DECLARATIONS, "pm/plugins_state.py": PM_PLUGINS_STATE, "pm/workspace.py": PM_WORKSPACE, "gateway/session_hosted_rpc.py": SESSION_HOSTED_RPC, "agent/turn_author.py": TURN_AUTHOR, "gateway/owner_identity.py": OWNER_IDENTITY, "agent/runtime_cwd.py": RUNTIME_CWD, "gateway/session_policy.py": SESSION_POLICY, "hermes_cli/_launchers.py": LAUNCHERS, "agent/memory_manager.py": MEMORY_MANAGER, "agent/agent_init.py": AGENT_INIT, "hermes_cli/projects_db.py": PROJECTS_DB, "agent/memory_provider.py": BASE, "agent/turn_context.py": TURN_CONTEXT, "run_agent.py": RUN_AGENT, "agent/message_metadata.py": METADATA,
          "agent/context_compressor.py": COMPRESSOR, "plugins/plugin_loader.py": LOADER, "plugins/memory/__init__.py": MEMORY_PLUGINS,
-         "hermes_cli/memory_setup.py": MEMORY_SETUP, "hermes_cli/config_defaults.py": DEFAULTS}
+         "hermes_cli/memory_setup.py": MEMORY_SETUP, "hermes_cli/config_defaults.py": DEFAULTS, "tools/hook_output_spill.py": HOOK_SPILL, "hermes_cli/config.py": HERMES_CONFIG}
 
 
 def host(tmp_path, **edit):
@@ -342,10 +347,10 @@ def test_real_local_hermes_has_no_missing_dependency():
 
 
 @pytest.mark.skipif(not os.path.isdir(REAL), reason="没有本机 Hermes 源码")
-@pytest.mark.parametrize("rev,changed", [("935c1e8962d43de3ef0adde30e80dda55d0247db", {"base_sync_turn", "host_turn_start_kwargs", "host_sync_kwargs", "config_format", "init_kwargs", "owner_identity", "host_turn_cwd", "runtime_python", "group_room_platform", "bot_author_tag", "plugin_python_deps"}),
-                                         ("0e427d788d", {"owner_identity", "group_room_platform", "plugin_python_deps"}), ("2bd378ed1b", set())])
+@pytest.mark.parametrize("rev,changed", [("935c1e8962d43de3ef0adde30e80dda55d0247db", {"base_sync_turn", "host_turn_start_kwargs", "host_sync_kwargs", "config_format", "init_kwargs", "owner_identity", "host_turn_cwd", "runtime_python", "group_room_platform", "bot_author_tag", "plugin_python_deps", "prefetch_spill_limit"}),
+                                         ("0e427d788d", {"owner_identity", "group_room_platform", "plugin_python_deps"}), ("2bd378ed1b", set()), ("ae2a81ccc0", set())])   # ae2a81ccc0＝v0.23.2：两处挪了位置、设置格式 53，全对
 def test_pinned_revisions_read_through_git_match_the_compat_table(rev, changed):
-    """兼容表第 9 节的三版对照：Dolphin 钉的 935c1e89 比后两版老——sync_turn 没有 turn_author、宿主不传作者字段、设置格式 40；v0.22.0 缺 gateway.owner_identity（那时还没有登录身份比较）；host_turn_cwd 在 v0.22.0 上只有 scoped_session_cwd 一个来源，后备照常可用，按「任意一个就算 ok」不报变了；935c1e89 两个都没有，报变了。现在这一版二十项全对（v0.22.0 另外没有群聊的 session_hosted_rpc.py、插件依赖声明的成员选择那一段还是老写法）。"""
+    """兼容表第 9 节的三版对照：Dolphin 钉的 935c1e89 比后两版老——sync_turn 没有 turn_author、宿主不传作者字段、设置格式 40；v0.22.0 缺 gateway.owner_identity（那时还没有登录身份比较）；host_turn_cwd 在 v0.22.0 上只有 scoped_session_cwd 一个来源，后备照常可用，按「任意一个就算 ok」不报变了；935c1e89 两个都没有，报变了。现在这一版（v0.23.2）二十一项全对（v0.22.0 另外没有群聊的 session_hosted_rpc.py、插件依赖声明的成员选择那一段还是老写法）。"""
     if subprocess.run(["git", "-C", REAL, "cat-file", "-e", rev], capture_output=True).returncode != 0:
         pytest.skip("本机 git 里没有这个提交")
     r = HC.doctor_from_reader(git_reader(rev))
@@ -389,6 +394,112 @@ def test_host_turn_cwd_both_gone_says_desktop_falls_back_to_life_and_is_not_fata
         assert c["status"] == "changed" and "桌面版会退回记进「生活」" in c["detail"] and "桌面版会退回记进「生活」" in c["if_changed"]
         assert "scoped_session_cwd" in c["detail"] and "active_policy" in c["detail"]
         assert "missing" not in status(r).values() and r["exit_code"] == 1 and "workspace" in r["affected_features"]
+
+
+# ------------------------------------------------------------------ Hermes v0.23.2 的新布局（两处挪了位置，设置格式 53）
+NEW_FLAGS_FILE = "agent/conversation_compression_scaffolding.py"
+NEW_INIT_FILE = "agent/agent_init_memory_provider.py"
+INIT_FUNC = AGENT_INIT[:AGENT_INIT.index("\ndef build(")]
+
+
+def host_v0232_files(tmp_path, scaffolding="keep", init_module="keep", **edit):
+    """v0.23.2 的布局：_SYNTHETIC_USER_FLAGS 在 conversation_compression_scaffolding.py（老模块 message_metadata.py 没有它了），
+    _memory_provider_init_kwargs 在 agent_init_memory_provider.py（agent_init.py 只 import 它、照旧 add_provider 再 initialize）。
+    scaffolding／init_module 给 (旧文字, 新文字) 就改新文件里的一处，给 None 表示整个新文件不存在。"""
+    assert "agent/message_metadata.py" not in edit and "agent/agent_init.py" not in edit or edit.get("agent/agent_init.py") is None
+    base = {"agent/message_metadata.py": None, "agent/agent_init.py": (INIT_FUNC, "from agent.agent_init_memory_provider import _memory_provider_init_kwargs\n")}
+    base.update(edit)
+    root = host(tmp_path, **base)
+    for rel, text, ed in ((NEW_FLAGS_FILE, METADATA + "_SYNTHETIC_USER_PREFIXES = ('[note]',)\ndef has_scaffolding_flag(m): ...\ndef is_user_role_scaffolding(m): ...\n", scaffolding),
+                          (NEW_INIT_FILE, INIT_FUNC, init_module)):
+        if ed is None:
+            continue
+        if ed != "keep":
+            assert ed[0] in text, (rel, ed[0])
+            text = text.replace(*ed)
+        p = os.path.join(root, rel)
+        with open(p, "w", encoding="utf-8") as f:
+            f.write(text)
+    return root
+
+
+def one_check(r, cid):
+    return next(c for c in r["checks"] if c["id"] == cid)
+
+
+def test_v0232_layout_everything_ok(tmp_path):
+    r = HC.doctor(host_v0232_files(tmp_path))
+    assert all(s == "ok" for s in status(r).values()), status(r)
+    assert r["exit_code"] == 0 and r["summary"]["changed"] == 0 and r["summary"]["missing"] == 0
+
+
+def test_v0232_flag_set_is_read_from_the_new_module_and_compared_as_before(tmp_path):
+    r = HC.doctor(host_v0232_files(tmp_path))
+    assert one_check(r, "machinery_markers")["status"] == "ok" and "共 5 个" in one_check(r, "machinery_markers")["detail"]
+    r = HC.doctor(host_v0232_files(tmp_path / "x", scaffolding=('"_dropped_toolcall_nudge",', '"_dropped_toolcall_nudge", "_brand_new_nudge",')))
+    c = one_check(r, "machinery_markers")
+    assert c["status"] == "changed" and "_brand_new_nudge" in c["detail"] and "write" in c["affects"] and r["exit_code"] == 1
+    assert [k for k, v in status(r).items() if v != "ok"] == ["machinery_markers"]
+    r = HC.doctor(host_v0232_files(tmp_path / "y", scaffolding=('"_dropped_toolcall_nudge",', '"_dropped_toolcall_nudge", "_brand_new_synthetic",')))
+    assert one_check(r, "machinery_markers")["status"] == "ok"          # 名字以 _synthetic 结尾的按模式认，和老布局一样
+
+
+def test_v0232_flags_nowhere_is_missing_and_old_module_flags_still_work_when_present(tmp_path):
+    r = HC.doctor(host_v0232_files(tmp_path, scaffolding=None))        # 新模块没有，老模块也没有 → 找不到
+    c = one_check(r, "machinery_markers")
+    assert c["status"] == "missing" and "_SYNTHETIC_USER_FLAGS" in c["detail"] and r["exit_code"] == 1
+    r = HC.doctor(host_v0232_files(tmp_path / "x", scaffolding=None, **{"agent/conversation_compression.py": None}))   # 同上，老模块文件也不在
+    assert one_check(r, "machinery_markers")["status"] == "missing"
+
+
+def test_v0232_flags_old_module_that_only_imports_the_set_does_not_hide_the_new_one(tmp_path):
+    """v0.23.2 的老模块 conversation_compression.py 可能只是 import 这个集合、不再赋值：不能因此读成「没有」，也不能盖掉新模块里的集合。"""
+    imp = "from agent.conversation_compression_scaffolding import _SYNTHETIC_USER_FLAGS\n"
+    root = host_v0232_files(tmp_path, scaffolding=('"_dropped_toolcall_nudge",', '"_dropped_toolcall_nudge", "_brand_new_nudge",'))
+    with open(os.path.join(root, "agent/conversation_compression.py"), "w") as f:
+        f.write(imp)
+    c = one_check(HC.doctor(root), "machinery_markers")
+    assert c["status"] == "changed" and "_brand_new_nudge" in c["detail"]
+
+
+def test_v0232_init_kwargs_found_in_the_new_module_with_the_same_content_checks(tmp_path):
+    assert one_check(HC.doctor(host_v0232_files(tmp_path)), "init_kwargs")["status"] == "ok"
+    for i, (old, new, word) in enumerate([('        kwargs["cwd"] = agent.session_cwd', '        kwargs["somewhere"] = agent.session_cwd', "cwd"),
+                                          ('"agent_context": platform if platform in ("cron", "subagent") else "primary",', "", "agent_context"),
+                                          ('"platform": platform or "cli",', "", "platform"),
+                                          ('"hermes_home": "h",', "", "hermes_home")]):
+        r = HC.doctor(host_v0232_files(tmp_path / str(i), init_module=(old, new)))
+        c = one_check(r, "init_kwargs")
+        assert c["status"] == "changed", (word, c)
+        assert [k for k, v in status(r).items() if v != "ok"] == ["init_kwargs"], word
+
+
+def test_v0232_init_kwargs_missing_everywhere_and_function_absent(tmp_path):
+    r = HC.doctor(host_v0232_files(tmp_path, init_module=None))        # 新模块不在，agent_init.py 里也没有这个函数 → 变了
+    assert one_check(r, "init_kwargs")["status"] == "changed"
+    r = HC.doctor(host_v0232_files(tmp_path / "x", init_module=None, **{"agent/agent_init.py": None}))   # 两个文件都不在 → 读不到
+    assert one_check(r, "init_kwargs")["status"] == "missing"
+    r = HC.doctor(host_v0232_files(tmp_path / "y", init_module=("def _memory_provider_init_kwargs(agent, platform):", "def _renamed_kwargs(agent, platform):")))
+    assert one_check(r, "init_kwargs")["status"] == "ok"                # 改了名但内容还在：和老探测一样按内容找得到，不报
+
+
+def test_v0232_init_kwargs_named_function_in_new_module_is_decisive_over_other_functions(tmp_path):
+    """agent_init.py 里别的函数碰巧含 hermes_home、session_id、agent_context、platform、cwd 这些字，不能盖过新模块里真正的那个函数。"""
+    decoy = "\ndef _decoy(agent, platform):\n    return {'session_id': 1, 'hermes_home': 2, 'agent_context': 3, 'platform': 4, 'cwd': 5}\n"
+    root = host_v0232_files(tmp_path, init_module=('        kwargs["cwd"] = agent.session_cwd', '        kwargs["somewhere"] = agent.session_cwd'))
+    with open(os.path.join(root, "agent/agent_init.py"), "a") as f:
+        f.write(decoy)
+    assert one_check(HC.doctor(root), "init_kwargs")["status"] == "changed"
+
+
+def test_config_format_53_is_verified_and_neighbours_are_not(tmp_path):
+    assert 53 in HC.KNOWN_CONFIG_FORMATS
+    r = HC.doctor(host(tmp_path / "a", **{"hermes_cli/config_defaults.py": ('"_config_version": 52', '"_config_version": 53')}))
+    c = one_check(r, "config_format")
+    assert c["status"] == "ok" and "53" in c["detail"] and r["exit_code"] == 0
+    for v in (51, 54):
+        r = HC.doctor(host(tmp_path / str(v), **{"hermes_cli/config_defaults.py": ('"_config_version": 52', '"_config_version": %d' % v)}))
+        assert one_check(r, "config_format")["status"] == "changed", v
 
 
 def test_every_dependency_id_appears_in_the_compat_table():

@@ -148,7 +148,7 @@ def test_pi_real_profile_pages_fit_20kb_cover_everything_and_search_only_once(tm
     limit = H.profile("pi").paths["mcp_return"].limits[0].threshold
 
     async def go(sess, init):
-        pages, spans, r = [], [], await sess.call_tool("recall", {"query": "原话 好的 ab 短的"})
+        pages, spans, r = [], [], await sess.call_tool("recall", {"query": "原话 好的 ab 短的", "budget": 24000})        # 这条测「翻完一整份参照档」：带 budget 取到 24,000（不带就是新默认 8,000）
         while True:
             assert not r.isError, text_of(r)
             full = S.final_return_text(raw(r))
@@ -234,7 +234,7 @@ def test_forged_request_meta_is_not_an_identity(tmp_path):
 def test_pi_default_rejects_indivisible_oversize_group_over_wire(tmp_path):
     mem, acc, handle = pi_setup(tmp_path, texts=["中文原话" * 8000])
     async def go(sess, init):
-        result = await sess.call_tool("recall", {"query": "原话"})
+        result = await sess.call_tool("recall", {"query": "原话", "budget": 24000})
         assert result.isError and "group_too_large" in text_of(result)
         assert "get_messages" in text_of(result)
         assert H.fits(H.profile("pi").paths["mcp_return"], text_of(result))[0]

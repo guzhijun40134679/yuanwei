@@ -416,7 +416,7 @@ def test_every_real_host_profile_mcp_path_pages_fit_all_its_limits(tmp_path, hos
     读取工具没开放的宿主（身份链没证实）这里把 identity 临时改成 in_process，只为核大小这一层，不说它们的工具已开放。"""
     prof = dataclasses.replace(H.profile(host), identity="in_process")
     texts = ["这是一条很长的中文原话，" * 3000, "😀好的😀谢谢😀" * 3000, "ab\n" * 9000]
-    mem, acc, surf, ids = setup(tmp_path, recall_ranked_pages=False, host=host, texts=texts, profile=prof)
+    mem, acc, surf, ids = setup(tmp_path, recall_ranked_pages=False, recall_budget=None, host=host, texts=texts, profile=prof)
     path = prof.paths["mcp_return"]
     r = surf.call("recall", {"query": "原话 好的 ab"})
     pages = 0
@@ -445,7 +445,7 @@ def test_every_real_host_hook_path_note_fits(tmp_path, host):
     u = independent_units(out["inject"])
     for l in prof.paths["hook_context"].limits:
         assert u[l.unit] + prof.paths["hook_context"].overhead.get(l.unit, 0) <= l.threshold, (host, l.unit, u[l.unit])
-    assert len(out["inject"]) <= 8000
+    assert len(out["inject"]) <= mem.cfg.note_chars                                    # 字数上限现在只是安全兜底（24,000）；宿主钩子路径的全部限制上面已经逐项核过
 
 
 def test_allowed_reads_may_start_background_organizing_but_status_and_refused_calls_never_do(tmp_path):

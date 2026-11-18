@@ -163,8 +163,15 @@ def _real_kwargs_builder():
     root = _hermes_src()
     if root is None:
         return None
-    mod = ast.parse((root / "agent" / "agent_init.py").read_text(encoding="utf-8"))
-    fn = next((n for n in mod.body if isinstance(n, ast.FunctionDef) and n.name == "_memory_provider_init_kwargs"), None)
+    fn, helpers = None, []
+    for rel in ("agent_init_memory_provider.py", "agent_init.py"):                              # v0.23.2 把这个函数挪到了前一个文件，老版本在后一个
+        f = root / "agent" / rel
+        if f.is_file():
+            mod = ast.parse(f.read_text(encoding="utf-8"))
+            fn = next((n for n in mod.body if isinstance(n, ast.FunctionDef) and n.name == "_memory_provider_init_kwargs"), None)
+            if fn is not None:
+                helpers = [n for n in mod.body if isinstance(n, ast.FunctionDef) and n.name == "_stored_transcript_kwargs"]       # v0.23.2 的函数还要调它（resumed、message_count）
+                break
     par = ast.parse((root / "agent" / "agent_init_params.py").read_text(encoding="utf-8"))
     ident = None
     for n in par.body:
@@ -174,7 +181,9 @@ def _real_kwargs_builder():
         return None
     fn.decorator_list = []
     ns = {"Any": object, "suppress": suppress, "get_hermes_home": lambda: Path("/unused"), "_GATEWAY_IDENTITY_PARAMS": ident}
-    exec(compile(ast.Module(body=[fn], type_ignores=[]), "agent_init.py", "exec"), ns)       # noqa: S102  只取这一个函数，不导入 Hermes
+    for h in helpers:
+        h.decorator_list = []
+    exec(compile(ast.Module(body=helpers + [fn], type_ignores=[]), "agent_init.py", "exec"), ns)       # noqa: S102  只取这一个函数，不导入 Hermes
     return ns["_memory_provider_init_kwargs"], ident
 
 

@@ -25,13 +25,13 @@ DEPENDENCIES = [
      "affects": ["bot_filter"], "if_changed": "没有这几个字段就当老宿主（0.20.0 那种），状态里标 legacy_no_author_field"},
     {"id": "host_sync_kwargs", "what": "宿主在每轮结束调 sync_all 时带 messages 和 turn_author", "where": "run_agent.py: _sync_external_memory_for_turn（含 .sync_all(...) 的函数）",
      "affects": ["write", "bot_filter"], "if_changed": "不带 messages：写入关掉；不带 turn_author：机器人作者过滤关掉"},
-    {"id": "machinery_markers", "what": "宿主区分真人提问和自注入轮次的标记：用户行的 display_kind，和 _SYNTHETIC_USER_FLAGS 里的合成标记", "where": "agent/conversation_compression.py 或 agent/message_metadata.py: _SYNTHETIC_USER_FLAGS；agent/context_compressor.py: display_kind",
+    {"id": "machinery_markers", "what": "宿主区分真人提问和自注入轮次的标记：用户行的 display_kind，和 _SYNTHETIC_USER_FLAGS 里的合成标记", "where": "agent/conversation_compression_scaffolding.py（v0.23.2 起）、agent/conversation_compression.py 或 agent/message_metadata.py（老版本）: _SYNTHETIC_USER_FLAGS；agent/context_compressor.py: display_kind",
      "affects": ["write"], "if_changed": "宿主多出来的、名字不以 _synthetic 结尾的合成标记我们认不出，会被当真人提问记下来：要把它加进 hermes_adapter.SYNTHETIC_USER_FLAGS"},
     {"id": "plugin_discovery", "what": "用户插件目录 $HERMES_HOME/plugins/<名字>/ 里的记忆提供者会被发现并加载（register_memory_provider）", "where": "plugins/plugin_loader.py（老版本在 plugins/memory/__init__.py）: get_hermes_home() / \"plugins\"；plugins/memory/__init__.py: register_memory_provider",
      "affects": ["install"], "if_changed": "setup 装不上：先看新的安装位置再改 hermes_setup.py 里的 PLUGIN_REL"},
     {"id": "provider_activation", "what": "memory.provider 这个设置键选定外部记忆提供者", "where": "hermes_cli/memory_setup.py: config[\"memory\"][\"provider\"]",
      "affects": ["install"], "if_changed": "setup/uninstall 改的键变了：改 hermes_setup.py 里的 MEMORY_PROVIDER_KEY"},
-    {"id": "init_kwargs", "what": "宿主初始化插件时总会传 agent_context、platform、hermes_home，有会话工作目录就传 cwd", "where": "agent/agent_init.py: _memory_provider_init_kwargs（老版本是 initialize 前拼的 _init_kwargs）",
+    {"id": "init_kwargs", "what": "宿主初始化插件时总会传 agent_context、platform、hermes_home，有会话工作目录就传 cwd", "where": "agent/agent_init_memory_provider.py（v0.23.2 起）或 agent/agent_init.py（老版本）: _memory_provider_init_kwargs（更老的版本是 initialize 前拼的 _init_kwargs）",
      "affects": ["agent_context", "workspace"], "if_changed": "agent_context 缺了：这个实例按「说不清」处理，不读不写（不当成主对话）；cwd 没给时（Hermes 只有会话有工作目录才传）：经典终端（平台 cli）取 Hermes 进程目录（优先 resolve_agent_cwd）照项目库判；其他本机入口（tui、desktop、local）先问 Hermes 这一轮的文件夹（见 host_turn_cwd），问不到才记进「生活」；网关聊天平台记进「生活」、不问；cwd 这个键整个不传了：经典终端也只靠进程目录，别的本机入口靠 host_turn_cwd，都不行就落进生活"},
     {"id": "projects_db", "what": "项目库：$HERMES_HOME/projects.db 的 projects(id, name, archived) 和 project_folders(project_id, path)；项目归属＝cwd 在文件夹里（最长的赢，归档的不算）", "where": "hermes_cli/projects_db.py: projects_db_path、SCHEMA_SQL、project_for_path",
      "affects": ["workspace"], "if_changed": "认不出项目：这一轮不读不写（不落进生活）；这一版没有项目功能：所有对话落进生活；要重核 hermes_workspace.resolve 的规则"},
@@ -51,10 +51,13 @@ DEPENDENCIES = [
      "affects": ["bot_filter"], "if_changed": "标签改名或去掉了：机器人发起的轮次认不出，会被当成本人的话（本机平台没有别的可靠依据）；要对着新字段改 hermes_adapter 的机器人判断"},
     {"id": "plugin_python_deps", "what": "插件依赖声明：plugin.yaml 里的 python_dependencies／pip_dependencies 由 read_python_declaration 读；当前 memory.provider 并进各家目录的成员表（_provider_from_config）；重建环境时按成员表带上依赖（enabled_member_dirs 用 installs_packages，members_stamp 把 plugin.yaml 内容算进环境指纹）。原委靠它让 Hermes 重建环境时自动带上 NumPy", "where": "pm/plugin_declarations.py: read_python_declaration；pm/plugins_state.py: _provider_from_config、enabled_plugins_ordered；pm/workspace.py: enabled_member_dirs、members_stamp",
      "affects": ["numpy_install"], "if_changed": "声明机制变了或去掉了：Hermes 重建环境时不会再自动带上 NumPy，向量会在重建后悄悄退回只用关键词；status 会报「没有 NumPy」，向导装的 NumPy 要重新装；要对着新机制改 plugin.yaml 的声明写法"},
+    {"id": "prefetch_spill_limit", "what": "记忆插件预取结果的上限：设置 memory.prefetch_spill_enabled（默认关）、hooks.output_spill.max_chars（默认 DEFAULT_MAX_CHARS＝10,000）；关着时上限 max(max_chars×10, 100000)，开着时按 max_chars 截；设置由 hermes_cli.config.load_config() 读（插件在 Hermes 进程里只读这一处）", "where": "agent/memory_manager.py: 预取的 spill 判断（约 292–299 行）；tools/hook_output_spill.py: DEFAULT_MAX_CHARS；hermes_cli/config.py: load_config",
+     "affects": ["prefetch"], "if_changed": "名字变了：便条在 Hermes 里的字符上限读不到，退回保守的 10,000 字符（英文便条只能装一部分词元额度），状态里写明；插件照常加载"},
     {"id": "config_format", "what": "设置文件的格式版本（_config_version）是我们核过的版本", "where": "hermes_cli/config_defaults.py（或 hermes_cli/config.py）: \"_config_version\"",
      "affects": ["install"], "if_changed": "只用 memory.provider 这一个键，格式变了多半不影响；但要重新核这个键的位置，并重跑 setup 记下新格式版本"},
 ]
-KNOWN_CONFIG_FORMATS = (50, 52)                      # 核过的设置格式版本：v0.22.0 之前是 50，本机现在这一版是 52
+KNOWN_CONFIG_FORMATS = (50, 52, 53)                  # 核过的设置格式版本：v0.22.0 之前是 50，v0.23.0 那一版是 52
+# 53（v0.23.2）：52→53 唯一的迁移是 agent.clarify_timeout 3600→90（hermes_cli/config_migrations.py），不碰 memory.provider，所以兼容
 KNOWN_ABSTRACT = frozenset(["name", "is_available", "initialize", "get_tool_schemas"])
 EXPECTED = {                                          # 方法名 → 我们要用的参数名（"**" ＝要带 **kwargs）
     "initialize": ["session_id", "**"], "get_tool_schemas": [], "handle_tool_call": ["tool_name", "args", "**"], "prefetch": ["query", "session_id"],
@@ -64,6 +67,46 @@ EXPECTED = {                                          # 方法名 → 我们要�
 SYNC_PARAMS = ["user_content", "assistant_content", "session_id", "messages", "turn_author"]
 OUR_SYNTHETIC_FLAGS = ("_todo_snapshot_synthetic", "_empty_recovery_synthetic", "_verification_stop_synthetic", "_pre_verify_synthetic", "_dropped_toolcall_nudge")
 FEATURES = ("tools", "prefetch", "write", "bot_filter", "session_switch")
+HOOK_CHARS_FALLBACK = 10000                           # 读不到 Hermes 设置时便条的保守字符上限（hooks.output_spill.max_chars 的默认值）
+
+
+def prefetch_limit(load_config=None, default_max_chars=None):
+    """Hermes 里记忆插件预取结果的字符上限，照 Hermes 自己的读法（只读 hermes_cli.config.load_config()，只在 Hermes 进程里能用）：
+    memory.prefetch_spill_enabled 开了：上限＝hooks.output_spill.max_chars；没开（默认）：上限＝max(max_chars×10, 100000)；
+    max_chars 没设就用 DEFAULT_MAX_CHARS（读不到就 10,000）。任何一步读不到、类型不对：退回保守的 10,000，并写明原因，**不抛错**（读设置失败不能影响插件加载）。
+    返回 {"chars", "basis": no_spill｜spill｜fallback, "max_chars", "reason"}。load_config、default_max_chars 给测试注入。"""
+    def fallback(reason):
+        return {"chars": HOOK_CHARS_FALLBACK, "basis": "fallback", "max_chars": None, "reason": reason}
+    try:
+        if load_config is None:
+            from hermes_cli.config import load_config                                     # noqa: PLC0415  只在 Hermes 进程里有
+        cfg = load_config()
+        if not isinstance(cfg, dict):
+            return fallback("设置读出来不是字典")
+        if default_max_chars is None:
+            try:
+                from tools.hook_output_spill import DEFAULT_MAX_CHARS as default_max_chars   # noqa: PLC0415
+            except Exception:                                                              # noqa: BLE001
+                default_max_chars = HOOK_CHARS_FALLBACK
+        mem = cfg.get("memory")
+        mem = mem if isinstance(mem, dict) else {}
+        spill = mem.get("prefetch_spill_enabled", False)
+        if spill is None:
+            spill = False
+        if not isinstance(spill, bool):
+            return fallback("memory.prefetch_spill_enabled 不是布尔值")
+        hooks = cfg.get("hooks")
+        out = hooks.get("output_spill") if isinstance(hooks, dict) else None
+        mx = out.get("max_chars") if isinstance(out, dict) else None
+        if mx is None:
+            mx = default_max_chars
+        if not isinstance(mx, int) or isinstance(mx, bool) or mx <= 0:
+            return fallback("hooks.output_spill.max_chars 不是正整数")
+        if spill:
+            return {"chars": mx, "basis": "spill", "max_chars": mx, "reason": None}
+        return {"chars": max(mx * 10, 100000), "basis": "no_spill", "max_chars": mx, "reason": None}
+    except Exception as e:                                                                 # noqa: BLE001
+        return fallback("读不到 Hermes 设置（%s）" % type(e).__name__)
 
 
 # ---------------------------------------------------------------- 运行时：按功能探测（看基类对象）
@@ -213,13 +256,16 @@ def _check_host(rd):
                         "找不到调 sync_all 的函数" if not found else ("宿主带的字段：messages、turn_author" if not miss else "宿主调 sync_all 时没带 %s" % miss)))
     dep = _dep("machinery_markers")
     flags, where = None, None
-    for rel in ("agent/conversation_compression.py", "agent/message_metadata.py", "agent/context_compressor.py"):
+    for rel in ("agent/conversation_compression_scaffolding.py", "agent/conversation_compression.py", "agent/message_metadata.py", "agent/context_compressor.py"):   # 新模块在前：谁先定义这个集合就以谁为准
         tree, err = _parse(rd, rel)
         if tree is None:
             continue
         for n in ast.walk(tree):
             if isinstance(n, ast.Assign) and any(isinstance(t, ast.Name) and t.id == "_SYNTHETIC_USER_FLAGS" for t in n.targets) and isinstance(n.value, (ast.Tuple, ast.List)):
                 flags, where = [e.value for e in n.value.elts if isinstance(e, ast.Constant)], rel
+                break
+        if flags is not None:
+            break
     cc = rd("agent/context_compressor.py") or ""
     has_dk = bool(re.search(r"\.get\(\s*[\"']display_kind[\"']\s*\)", cc))
     if flags is None or not has_dk:
@@ -266,16 +312,25 @@ def _check_install(rd):
 def _check_workspace(rd):
     out = []
     dep = _dep("init_kwargs")
-    tree, err = _parse(rd, "agent/agent_init.py")
-    if tree is None:
-        out.append(_res(dep, "missing", "没有 agent/agent_init.py 或读不懂"))
+    trees = [t for t in (_parse(rd, rel)[0] for rel in ("agent/agent_init_memory_provider.py", "agent/agent_init.py")) if t is not None]     # v0.23.2 把拼参数的函数挪到了新模块，老版本在 agent_init.py
+    if not trees:
+        out.append(_res(dep, "missing", "没有 agent/agent_init_memory_provider.py 也没有 agent/agent_init.py，或读不懂"))
     else:
-        best = None
-        for f in ast.walk(tree):
-            if isinstance(f, (ast.FunctionDef, ast.AsyncFunctionDef)):
-                consts = {n.value for n in ast.walk(f) if isinstance(n, ast.Constant) and isinstance(n.value, str)}
-                if {"hermes_home", "session_id"} <= consts and (best is None or len(consts) < len(best)):
-                    best = consts
+        best, named = None, False
+        for tree in trees:                                                         # 先找叫 _memory_provider_init_kwargs 的函数（谁先有算谁，找到了就以它为准）；都没有再退回按内容找
+            for f in ast.walk(tree):
+                if isinstance(f, ast.FunctionDef) and f.name == "_memory_provider_init_kwargs":
+                    consts = {n.value for n in ast.walk(f) if isinstance(n, ast.Constant) and isinstance(n.value, str)}
+                    best, named = (consts if {"hermes_home", "session_id"} <= consts else None), True
+                    break
+            if named:
+                break
+        for tree in () if named else trees:
+            for f in ast.walk(tree):
+                if isinstance(f, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                    consts = {n.value for n in ast.walk(f) if isinstance(n, ast.Constant) and isinstance(n.value, str)}
+                    if {"hermes_home", "session_id"} <= consts and (best is None or len(consts) < len(best)):
+                        best = consts
         if best is None:
             out.append(_res(dep, "changed", "找不到拼初始化参数的地方（含 hermes_home、session_id 的函数）"))
         else:
@@ -391,6 +446,25 @@ def _check_plugin_deps(rd):
     return [_res(dep, "ok" if not bad else "changed", "声明由 read_python_declaration 读（python_dependencies／pip_dependencies）；记忆提供者并进成员表；重建按成员表带上依赖、声明文件进环境指纹" if not bad else "变了：%s" % "；".join(bad))]
 
 
+def _check_prefetch_limit(rd):
+    """预取上限相关的名字还在不在（只读源码文字，不执行）。老版本没有这套设置记「changed」，和别的「功能不在」一样。"""
+    dep = _dep("prefetch_spill_limit")
+    mm, hs, cf = rd("agent/memory_manager.py"), rd("tools/hook_output_spill.py"), rd("hermes_cli/config.py")
+    gone = [n for n, t in (("agent/memory_manager.py", mm), ("tools/hook_output_spill.py", hs), ("hermes_cli/config.py", cf)) if t is None]
+    if gone:
+        return [_res(dep, "changed", "这一版没有（或读不了）%s：没有这套预取上限设置，便条的字符上限退回保守的 10,000" % "、".join(gone))]
+    bad = []
+    if "prefetch_spill_enabled" not in mm:
+        bad.append("memory_manager.py 里没有 prefetch_spill_enabled")
+    if "max_chars" not in mm and "max_chars" not in hs:
+        bad.append("不再有 max_chars")
+    if "DEFAULT_MAX_CHARS" not in hs:
+        bad.append("hook_output_spill.py 里没有 DEFAULT_MAX_CHARS")
+    if "def load_config" not in cf:
+        bad.append("hermes_cli/config.py 里没有 load_config")
+    return [_res(dep, "ok" if not bad else "changed", "预取上限的几个名字都在（prefetch_spill_enabled、max_chars、DEFAULT_MAX_CHARS、load_config）" if not bad else "变了：%s" % "；".join(bad))]
+
+
 def _check_bots(rd):
     """机器人（profile）和群聊：群聊平台名、机器人作者标签。这一版没有的功能记「changed」（功能不在，不是读不到）。"""
     out = []
@@ -415,7 +489,7 @@ def _check_bots(rd):
 
 
 def doctor_from_reader(rd, hermes_info=None):
-    checks = _check_base(rd) + _check_host(rd) + _check_install(rd) + _check_workspace(rd) + _check_lazy(rd) + _check_bots(rd) + _check_plugin_deps(rd)
+    checks = _check_base(rd) + _check_host(rd) + _check_install(rd) + _check_workspace(rd) + _check_lazy(rd) + _check_bots(rd) + _check_plugin_deps(rd) + _check_prefetch_limit(rd)
     order = {d["id"]: i for i, d in enumerate(DEPENDENCIES)}
     checks.sort(key=lambda c: order[c["id"]])
     summary = {s: sum(1 for c in checks if c["status"] == s) for s in ("ok", "changed", "missing")}

@@ -1319,7 +1319,7 @@ class Memory:
                 "long_unorganized": self.store.count_messages(self.ns, "is_long=1"), "paused": self.pause_state(),
                 "retrieval": {"mode": self.cfg.retrieval, "index_version": self.index_version, "vector_identity": self.vector_fp,
                               "vectors": self.store.vector_count(self.vector_fp) if self.vector_fp else 0, "first_budget": self.cfg.first_budget,
-                              "total_budget": self.cfg.total_budget, "pool_cap": self.cfg.pool_cap, "neighbors": self.cfg.neighbors,
+                              "recall_budget": self.cfg.recall_budget, "total_budget": self.cfg.total_budget, "pool_cap": self.cfg.pool_cap, "neighbors": self.cfg.neighbors,
                               "relevance": self._relevance_status(), "query_timeout": VX.query_timeout_status(self.cfg.embedding)},
                 "write": {"prompt": self.cfg.write_prompt, "config_version": self.cfg.config_version(), "store_kind": ws["store_kind"], "store_version": ws["store_version"]},
                 "cost": cost, "cost_today": self.cost_today(), "read_permission": self.read_permission(), "lock_held": self.lock_held(),

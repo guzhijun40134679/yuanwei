@@ -454,7 +454,7 @@ def test_note_config_validation(bad):
 
 def test_note_defaults_are_off_for_gates_and_pending():
     c = Config()
-    assert c.note_tau_kw is None and c.note_tau_vec is None and c.note_gates_status == "预览候选：关" and c.note_chars == 8000 and c.note_oversize == "stop"
+    assert c.note_tau_kw is None and c.note_tau_vec is None and c.note_gates_status == "预览候选：关" and c.note_chars == 24000 and c.note_tokens == 4200 and c.note_oversize == "stop"
 
 
 def test_unshown_set_counts_only_candidates_that_pass_the_gate(tmp_path):

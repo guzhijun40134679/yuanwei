@@ -32,8 +32,7 @@ def select_multi(reader, query, keywords=None, total_budget=None, first_budget=N
                 r["stats"]["retrieval"] = r["retrieval"]
             return r
         snap = reader.snapshot(cut)
-        total = min(total_budget or reader.cfg.total_budget, reader.cfg.total_budget)
-        first = min(first_budget or reader.cfg.first_budget, total)
+        total, first = reader.cfg.read_budgets(total_budget, first_budget)
         qreason = None
         if reader.cfg.retrieval == "hybrid" and reader.relevance_policy()["status"] == "uncalibrated":
             qreason = "semantic_uncalibrated"
@@ -69,11 +68,16 @@ def select_multi(reader, query, keywords=None, total_budget=None, first_budget=N
             return {"cut": snap.cut, "snapshot": snap, "pack": None, "selected": [], "material": None, "hits": [], "table": None, "tables": tables, "routes": {}, "stats": stats}
         tmap, m2o = snap.maps()
         sidx = PK.SessionIndex(snap.rows)
-        pk = PK.pack_reference(merged, sidx, snap.by_id, reader.mp, tmap, m2o, snap.visible, idx.searcher(), query, first_budget=first, total_budget=total,
-                               nbr=reader.cfg.neighbors, cap=reader.cfg.pool_cap, ruler=reader.cfg.ruler_version, provenance=reasons if idx.provenance_on else None)
+        def pack(total, first):
+            return PK.pack_reference(merged, sidx, snap.by_id, reader.mp, tmap, m2o, snap.visible, idx.searcher(), query, first_budget=first, total_budget=total,
+                                     nbr=reader.cfg.neighbors, cap=reader.cfg.pool_cap, ruler=reader.cfg.ruler_version, provenance=reasons if idx.provenance_on else None)
+        pk = pack(total, first)
+        if not pk["最终"]["选中"] and reader.cfg.relaxable_budget(total_budget, total):       # 同 Reader.select：第一条整条装不下，不带 budget 时放宽到 total_budget 再选一次
+            total, first = reader.cfg.read_budgets(reader.cfg.total_budget)
+            pk = pack(total, first)
         fin = pk["最终"]
         sel = sorted((pk["rows_by_id"][m] for m in fin["选中"]), key=lambda r: r["seq"])
-        return {"cut": snap.cut, "snapshot": snap, "pack": pk, "selected": sel, "material": fin["材料"], "hits": merged, "table": None, "tables": tables,
+        return {"cut": snap.cut, "snapshot": snap, "pack": pk, "selected": sel, "material": fin["材料"], "hits": merged, "table": None, "tables": tables, "budget_total": total,
                 "routes": {m: prov[m] for m in fin["选中"] if m in prov}, "stats": stats}
     finally:
         reader.embed_client = inner

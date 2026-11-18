@@ -3,11 +3,13 @@ import dataclasses
 import hashlib
 import json
 import os
+from typing import Optional
 
 from .cards import LightConfig
 from .errors import ConfigError
 
 PROMPT_VERSIONS = ("B0", "A")
+LEGACY_PAGE_CHARS = 30000      # 旧做法：recall 一页最多 30,000 字符（recall_page_tokens＝None 的旧参照，和按时间分页的旧路径用）
 LONG_LIMIT = 1500              # 超过这个码点数的单条不送去整理（记「超长未整理」），全文照存、全文建索引
 MAX_PROVIDER_PARAMS = {"model": "deepseek-flash", "temperature": 0, "reasoning_effort": "high", "max_tokens": 65536}
 
@@ -31,16 +33,18 @@ class Config:
     ruler_version: int = 2                    # 估算词元的尺子：2＝尺子 2（按字符类加权，英文不再多算）；1＝旧尺（研究回放和旧参照用）
     relevance_floor: bool = True              # 相关度下限：True＝开（默认，关键词命中或达到已标定语义下限才算候选）；False＝关，恢复小修 31 之前的取材（研究回放和旧参照用，不带来源说明）
     split_version: str = "split-2"            # 整理句子的切法：split-2＝另认英文句末；split-1＝旧切法。只影响以后封的步（封步时写进快照）
-    first_budget: int = 16000
-    total_budget: int = 24000
+    first_budget: int = 16000                 # 第一遍（主线优先）的上限（尺子的估算词元）；实际第一遍＝min(first_budget，总额×2÷3)（recall_budget 开着时）
+    total_budget: int = 24000                 # 一次查询总额的上限（助手带 budget 也最多到这里）
+    recall_budget: Optional[int] = 8000       # 不带 budget 的主动查，每次总共交多少（0.1.0a4 起默认 8,000）；总额＝min(带的 budget 或这个值，total_budget)；None＝旧算法（不带 budget 就是 total_budget，第一遍＝min(first_budget，总额)），旧参照用
     pool_cap: int = 10
     neighbors: int = 1
     recall_ranked_pages: bool = True          # True：按选料名次整组分页，页内按时间；False：旧参照按整份时间分页
-    recall_page_chars: int = 30000            # recall 一页最多多少字符（宿主单次返回上限更小时调小）
+    recall_page_tokens: Optional[int] = 14000 # recall 一页的主上限，按 ruler_version 的尺子量（尺子 2 下中文约 3 万字、英文远多于 3 万字符）；整组不拆；宿主硬限制另外独立核。None＝旧做法：只按字符分页（旧参照）
+    recall_page_chars: Optional[int] = None   # 额外的字符上限（宿主单次返回上限更小时调小）；None＝不设（recall_page_tokens 开着时）；旧参照（recall_page_tokens＝None）和按时间分页的旧路径里 None 就是 30,000
     get_messages_page_tokens: int = 8000
     # ---- 便条（自动档）：数值是离线测量前的暂定值；相关度门的门槛待测量后定，在那之前写「关」(None) 并标「待定」
-    note_chars: int = 8000                    # 便条全文（开头说明、边界、原话、提示行、编号）最多多少字符
-    note_tokens: int = 4200                   # 同时满足的估算词元上限（约 8,000 字符）；首段占三分之二
+    note_chars: int = 24000                   # 字符上限，只当安全兜底：默认值不会先于词元额度顶住（尺子 2 最轻的字符 177‰，4,200 词元最多约 23,700 字符）；宿主钩子路径的上限另外独立核；旧参照写 8000
+    note_tokens: int = 4200                   # 便条的主上限（估算词元，按 ruler_version 的尺子量）；首段占三分之二
     note_oversize: str = "stop"               # 整条放不下：stop＝停（研究原规则），skip＝跳过接着装。两种在测量里分不出，默认保持 stop
     note_free_gate: bool = True               # 免查门（只管整句寒暄、应答和显式标明的宿主命令不查）；读取权限（禁读）不受这个开关影响，始终执行
     note_tau_kw: float = None                 # 关键词覆盖率门槛；None＝关（默认）
@@ -66,6 +70,10 @@ class Config:
             raise ConfigError("write_prompt 只能是 %s，实际 %r" % (PROMPT_VERSIONS, self.write_prompt))
         if not isinstance(self.recall_ranked_pages, bool):
             raise ConfigError("recall_ranked_pages 必须是布尔值")
+        for k in ("recall_page_tokens", "recall_page_chars", "recall_budget"):
+            v = getattr(self, k)
+            if v is not None and (not isinstance(v, int) or isinstance(v, bool) or v <= 0):
+                raise ConfigError("%s 要么不设（None），要么是正整数，实际 %r" % (k, v))
         if self.retrieval not in ("keyword", "hybrid"):
             raise ConfigError("retrieval 只能是 keyword 或 hybrid，实际 %r" % (self.retrieval,))
         if self.vector_fallback not in ("strict", "partial"):
@@ -93,6 +101,24 @@ class Config:
             if not isinstance(v, int) or isinstance(v, bool) or v <= 0:
                 raise ConfigError("%s 必须是正整数" % k)
         return self
+
+    def page_chars_cap(self):
+        """旧做法（按字符）的页上限：显式设了用显式值，没设就是 30,000。"""
+        return self.recall_page_chars if self.recall_page_chars is not None else LEGACY_PAGE_CHARS
+
+    def read_budgets(self, total_budget=None, first_budget=None):
+        """（总额，第一遍）。recall_budget 开着：总额＝min(带的 total_budget 或 recall_budget，total_budget 上限)，第一遍＝min(first_budget，总额×2÷3 向下取整)；
+        recall_budget＝None（旧算法）：总额＝min(带的 total_budget 或 total_budget 上限，上限)，第一遍＝min(first_budget，总额)。"""
+        if self.recall_budget is None:
+            total = min(total_budget or self.total_budget, self.total_budget)
+            return total, min(first_budget or self.first_budget, total)
+        total = min(total_budget or self.recall_budget, self.total_budget)
+        return total, min(first_budget or self.first_budget, total * 2 // 3)
+
+    def relaxable_budget(self, total_budget, total):
+        """选空了（有相关候选、第一条整条装不下）时，能不能把这一次放宽到 total_budget 再选：只有新算法（recall_budget 开着）、调用方没带 budget、
+        而且这次的总额还没到 total_budget 才行。旧算法（recall_budget＝None）永远不放宽，和以前一样。"""
+        return self.recall_budget is not None and not total_budget and total < self.total_budget
 
     def write_snapshot(self, legacy=False):
         """影响整理输入的那些项的完整快照（封步时存进这一步，执行和重试都按它来）。

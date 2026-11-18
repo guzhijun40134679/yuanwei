@@ -224,8 +224,7 @@ class Reader:
         """参照档选料。返回 {"cut","snapshot","pack","selected"（按时间排的消息行）,"material"（编码后）}。没有可见原话或没有命中就是空选。"""
         query = redact_query(query)
         snap = self.snapshot(cut)
-        total = min(total_budget or self.cfg.total_budget, self.cfg.total_budget)
-        first = min(first_budget or self.cfg.first_budget, total)
+        total, first = self.cfg.read_budgets(total_budget, first_budget)
         qreason = self._prepare_query_vector(query)
         idx = snap.index()
         table, hits = idx.candidates(query)
@@ -234,11 +233,16 @@ class Reader:
             return dict({"cut": snap.cut, "snapshot": snap, "pack": None, "selected": [], "material": None, "hits": hits, "table": table}, **({"retrieval": info} if info else {}))
         tmap, m2o = snap.maps()
         sidx = PK.SessionIndex(snap.rows)
-        pk = PK.pack_reference(hits, sidx, snap.by_id, self.mp, tmap, m2o, snap.visible, idx.searcher(), query, first_budget=first, total_budget=total,
-                               nbr=self.cfg.neighbors, cap=self.cfg.pool_cap, ruler=self.cfg.ruler_version, provenance=idx.last_provenance if idx.provenance_on else None)
+        def pack(total, first):
+            return PK.pack_reference(hits, sidx, snap.by_id, self.mp, tmap, m2o, snap.visible, idx.searcher(), query, first_budget=first, total_budget=total,
+                                     nbr=self.cfg.neighbors, cap=self.cfg.pool_cap, ruler=self.cfg.ruler_version, provenance=idx.last_provenance if idx.provenance_on else None)
+        pk = pack(total, first)
+        if not pk["最终"]["选中"] and self.cfg.relaxable_budget(total_budget, total):       # 有相关候选、第一条整条就装不下：不带 budget 时自动放宽到 total_budget 再选一次
+            total, first = self.cfg.read_budgets(self.cfg.total_budget)
+            pk = pack(total, first)
         fin = pk["最终"]
         sel = sorted((pk["rows_by_id"][m] for m in fin["选中"]), key=lambda r: r["seq"])
-        return dict({"cut": snap.cut, "snapshot": snap, "pack": pk, "selected": sel, "material": fin["材料"], "hits": hits, "table": table}, **({"retrieval": info} if info else {}))
+        return dict({"cut": snap.cut, "snapshot": snap, "pack": pk, "selected": sel, "material": fin["材料"], "hits": hits, "table": table, "budget_total": total}, **({"retrieval": info} if info else {}))
 
     def select_multi(self, query, keywords=None, total_budget=None, first_budget=None, cut=None):
         """参照档选料加可选关键词（第二段）。没有有效的补充关键词时就是 select 本身。见 multi.select_multi。"""
@@ -308,7 +312,7 @@ class Reader:
             if not isinstance(query, str) or not query.strip():
                 raise ValueError("问题不能是空的")
             return RP.first(self, self.select(query, total_budget=budget, cut=cut), limit=limit_chars, query=redact_query(query))
-        limit = limit_chars or self.cfg.recall_page_chars
+        limit = limit_chars or self.cfg.page_chars_cap()
         if cursor is not None:
             cid, pos, off = self._split_token(cursor)
             cur = self.store.get_cursor(cid)
@@ -316,7 +320,7 @@ class Reader:
                 raise BadCursor("续读游标不存在，或不属于这个工作区的 recall：%s" % cursor)
             d = cur["data"]
             RP.validate(self, d, limit=limit_chars)
-            limit = d["page_limit"]
+            limit = d["page_limit"]["chars"]
             self._check_relevance_cursor(d)
             if pos >= len(d["chunks"]) or off > len(d["chunks"][pos]["content"]):
                 raise BadCursor("续读游标指到的位置不在这份结果里")
@@ -335,6 +339,9 @@ class Reader:
             cid = uuid.uuid4().hex[:16]
             pos, off = 0, 0
             if not chunks:
+                err = RP.oversize_empty(self, sel)
+                if err is not None:
+                    raise err
                 self.store.put_cursor(cid, self.ns, "recall", self.clock() if self.clock else None, d)
                 return {"cursor": None, "has_more": False, "text": "（没有找到相关记录）", "delivered": [], "cut": snap.cut, "selected_total": 0,
                         "stop_reason": "no_hits", "config": d["config"]}
