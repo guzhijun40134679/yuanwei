@@ -284,16 +284,42 @@ class ModeRunner:
         """逐个读额外的工作区；总时限里剩多少用多少。返回 (读到的[(键,显示名,序号,Memory,结果)], 没读到的[{workspace, why}])。"""
         got, missed = [], []
         for key, label, mem, idx in extras:
+            from .cross_recall import SourceAccess
+            source = SourceAccess(mem, self.acc)
+            denied = source.check_permission(tk.ident)
+            if denied:
+                missed.append({"workspace": label, "why": denied["reason"]})
+                continue
+            deletion_version = mem.store.del_ver(mem.ns)
             left = self.cfg.auto_timeout_s - (time.monotonic() - t0)
             if left <= 0:
                 missed.append({"workspace": label, "why": "timeout"})
                 continue
             state, v = self._with_deadline(tk, lambda reader, mem=mem: fn(reader, mem), mem=mem, timeout=left, mark=False)
+            denied = source.check_permission(tk.ident)
+            if denied or mem.store.del_ver(mem.ns) != deletion_version:
+                missed.append({"workspace": label, "why": denied["reason"] if denied else "history_deleted"})
+                continue
             if state == "ok":
+                if v is not None:
+                    v["_source_del_ver"] = deletion_version
                 got.append((key, label, idx, mem, v))
             else:
                 missed.append({"workspace": label, "why": state})
         return got, missed
+
+    def _sources_blocked(self, tk, parts):
+        """便条返回前核每个实际来源，既看来源设置，也看取材后是否发生删除。"""
+        from .cross_recall import SourceAccess
+        for _key, _label, mem, result in parts:
+            denied = SourceAccess(mem, self.acc).check_permission(tk.ident)
+            reason = denied["reason"] if denied else None
+            if reason is None and mem.store.del_ver(mem.ns) != result.get("_source_del_ver", tk.del_ver):
+                reason = "history_deleted"
+            if reason:
+                self.acc.event(tk, "blocked_at_return", {"reason": reason})
+                return {"inject": None, "kind": "error", "error": reason}
+        return None
 
     @staticmethod
     def _assemble(read_labels, sections, missed, dropped):
@@ -350,6 +376,10 @@ class ModeRunner:
             rows = a["snapshot"].by_id
             spans += [{"workspace": key, "msg_id": mid, "start": 0, "end": len(rows[mid]["content"])} for mid in r["delivered"]]
         text_out = self._assemble([f[1] for f in final], [(f[1], f[4]["note"]) for f in final if f[4]["note"]], missed, dropped)
+        source_parts = [(key, label, m, a) for key, label, m, a, _r in final]
+        blocked = self._sources_blocked(tk, source_parts)
+        if blocked:
+            return blocked
         if not H.fits(path, text_out)[0]:
             self.acc.event(tk, "oversize_blocked", {"path": "hook_context"})
             return {"inject": None, "kind": "error", "error": "return_too_large"}
@@ -358,6 +388,10 @@ class ModeRunner:
         if out["status"] != "ok":
             return {"inject": out["text"] if out["status"] == "refused" else None, "kind": "receipt" if out["status"] == "refused" else "error",
                     "receipt": out.get("receipt"), "reason": out.get("reason")}
+        blocked = self._sources_blocked(tk, source_parts)
+        if blocked:
+            self.acc.event(tk, "injection_failed", {"reason": blocked["error"]})
+            return blocked
         return {"inject": out["text"], "kind": "note", "note": final[0][4], "delivery": out["delivery"], "workspaces_not_read": missed + [{"workspace": d, "why": "over_limit"} for d in dropped]}
 
     # ---------------------------------------------------------------- 目录

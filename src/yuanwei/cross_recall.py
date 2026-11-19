@@ -3,7 +3,7 @@ from contextlib import ExitStack
 from contextvars import ContextVar
 import uuid
 
-from . import hosts as H, ranked_pages as RP, vectors as VX, cuts as CU
+from . import hosts as H, ranked_pages as RP, vectors as VX, cuts as CU, relevance as RL
 from .access import Access
 from .errors import BadCursor, HistoryDeleted
 from .tools import ToolSurface, ToolResult
@@ -14,9 +14,25 @@ DELIVERY_TICKETS = ContextVar("yuanwei_cross_delivery_tickets", default=None)
 
 class SourceAccess(Access):
     """借当前窗口的轮次许可，日志及删除版本始终属于材料来源。"""
-    def __init__(self, memory, owner):
+    def __init__(self, memory, owner, mirror_owner=False):
         super().__init__(memory)
         self.owner = owner
+        self.mirror_owner = mirror_owner
+
+    def _log_ticket(self, ticket, kind, detail, store=None):
+        super()._log_ticket(ticket, kind, detail, store=store)
+        # 旧的跨区按编号/挂接路径：来源保留实际跨度；owner 只保留活动计数，
+        # 使“本轮已查询/已交付”的关闭回执正确，且不把外区编号/正文指纹复制过去。
+        if self.mirror_owner and kind in {"start", "search_entered", "vector_called", "returned", "blocked_at_return", "injection_failed", "delivery_failed", "error"}:
+            safe = {k: detail[k] for k in ("delivery", "calls", "reason", "type") if k in detail}
+            self.owner._log_ticket(ticket, kind, dict(safe, cross_workspace=True))
+
+    def start_read(self, ident, entry, summary=None):
+        ticket = super().start_read(ident, entry, summary)
+        tickets = DELIVERY_TICKETS.get()
+        if self.mirror_owner and not isinstance(ticket, dict) and tickets is not None:
+            tickets.extend(((self, ticket), (self.owner, ticket)))
+        return ticket
 
     def current_turn(self, host, session_id, branch=""):
         return self.owner.current_turn(host, session_id, branch)
@@ -46,6 +62,7 @@ def _render(adapter, sources, data, items, page, cursor):
         if not chunks:
             continue
         material = RP.material(source["reader"], chunks, False) + "\n——yuanwei｜截点 %s" % CU.label(source["data"]["cut"])
+        material += RL.unorganized_notice(sorted(chunks, key=lambda ch: ch["seq"]))
         local[source_index] = material
         delivery[source_index] = RP.spans(source["reader"], chunks)
         sections.append("〔工作区：%s〕\n%s" % (data["sources"][source_index]["label"], material))

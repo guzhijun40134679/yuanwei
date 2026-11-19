@@ -336,15 +336,16 @@ def test_unavoidable_oversize_is_an_error_not_delivered_and_logged(tmp_path):
     assert "returned" not in kinds and "oversize_blocked" in kinds
 
 
-def test_return_time_recheck_blocks_a_deny_that_happens_during_the_read(tmp_path):
+def test_return_time_recheck_blocks_a_deny_that_happens_during_the_read(tmp_path, monkeypatch):
     mem, acc, surf, ids = setup(tmp_path)
-    orig = mem._reader.select_multi
+    from yuanwei.reader import Reader
+    orig = Reader.select_multi
 
-    def deny_then_select(*a, **k):
-        out = orig(*a, **k)
+    def deny_then_select(reader, *a, **k):
+        out = orig(reader, *a, **k)
         acc.deny_turn("pi", "S", "T1")
         return out
-    mem._reader.select_multi = deny_then_select
+    monkeypatch.setattr(Reader, "select_multi", deny_then_select)  # 37：拦带会话范围的实际读取视图
     r = surf.call("recall", {"query": "吃了烤鱼"})
     assert r.status == "refused" and r.reason == "control_changed" and TEXTS[1] not in r.text
     assert "已停止后续读取；本轮此前已查询，材料未交出／交付情况无法确认" in r.text

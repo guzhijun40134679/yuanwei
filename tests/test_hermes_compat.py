@@ -8,6 +8,7 @@ import textwrap
 
 import pytest
 
+from hermes_image_contract import SOURCES as IMAGE_SOURCES
 from yuanwei import cli
 from yuanwei import hermes_compat as HC
 
@@ -200,6 +201,9 @@ FILES = {"pm/plugin_declarations.py": PM_DECLARATIONS, "pm/plugins_state.py": PM
          "agent/context_compressor.py": COMPRESSOR, "plugins/plugin_loader.py": LOADER, "plugins/memory/__init__.py": MEMORY_PLUGINS,
          "hermes_cli/memory_setup.py": MEMORY_SETUP, "hermes_cli/config_defaults.py": DEFAULTS, "tools/hook_output_spill.py": HOOK_SPILL, "hermes_cli/config.py": HERMES_CONFIG}
 
+for _rel, _source in IMAGE_SOURCES.items():
+    FILES[_rel] = FILES.get(_rel, "") + "\n" + _source
+
 
 def host(tmp_path, **edit):
     """合成的 Hermes 目录树。edit 里给 {相对路径: (旧文字, 新文字)} 就改一处；新文字 None 表示整个文件不存在。"""
@@ -355,8 +359,12 @@ def test_pinned_revisions_read_through_git_match_the_compat_table(rev, changed):
         pytest.skip("本机 git 里没有这个提交")
     r = HC.doctor_from_reader(git_reader(rev))
     st = status(r)
+    image_checks = {k: st.pop(k) for k in ("memory_query_text", "memory_sync_text")}
     assert "missing" not in st.values(), (rev, st)
     assert {k for k, v in st.items() if v != "ok"} == changed, (rev, st)
+    # 新检查明确报告没核：v0.20 缺两套函数，v0.22 缺 native API 尾注构造函数。
+    expected_images = ("missing", "missing") if rev.startswith("935c1e89") else ("ok", "missing") if rev == "0e427d788d" else ("ok", "ok")
+    assert (image_checks["memory_query_text"], image_checks["memory_sync_text"]) == expected_images, (rev, image_checks)
 
 
 def test_cli_doctor_prints_json_and_exit_code(tmp_path, capsys):

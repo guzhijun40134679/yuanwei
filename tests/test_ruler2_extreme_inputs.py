@@ -44,7 +44,8 @@ def test_every_get_messages_page_fits_the_host_limits_for_extreme_inputs(tmp_pat
         while True:
             ok, detail = H.fits(path, out["text"])
             assert ok, (host, mid, detail)                                          # 最终文字（含说明、游标、数据边界）满足这家宿主这条路径的全部限制
-            assert out["messages"] and out["text"].count("——yuanwei｜") == 1        # 分页说明在最终文字里
+            assert out["messages"] and out["text"].count("——yuanwei｜截点") == 1  # 37新增未整理说明，分页说明仍只有一份
+            assert out["text"].count("——yuanwei｜未整理：") == 1
             if out["cursor"]:
                 assert out["cursor"] in out["text"]                                  # 游标也在最终文字里
             got.append(out["messages"][0]["range"])

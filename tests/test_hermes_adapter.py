@@ -452,17 +452,17 @@ def test_refusals_happen_before_any_search_including_old_cursors(tmp_path):
         cnt.close()
 
 
-def test_a_read_that_started_in_turn_1_is_dropped_when_turn_2_arrives_before_it_returns(tmp_path):
+def test_a_read_that_started_in_turn_1_is_dropped_when_turn_2_arrives_before_it_returns(tmp_path, monkeypatch):
     mem, a = mk(tmp_path)
     turn(a, 1, "普通")
-    rd = mem._reader
-    orig = rd.select_multi
+    from yuanwei.reader import Reader
+    orig = Reader.select_multi
 
-    def sel(*args, **kw):
-        out = orig(*args, **kw)
+    def sel(reader, *args, **kw):
+        out = orig(reader, *args, **kw)
         turn(a, 2, "#yuanwei-nomem")                                  # 搜索做完、还没返回，下一轮到了
         return out
-    rd.select_multi = sel
+    monkeypatch.setattr(Reader, "select_multi", sel)  # 37：读取视图带会话范围；拦实际使用的视图
     r = call(a, "recall", {"query": "吃了什么烤鱼"})
     assert r["status"] == "refused" and TEXTS[1] not in r["text"]
 

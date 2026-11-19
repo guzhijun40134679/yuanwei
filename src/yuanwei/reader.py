@@ -2,8 +2,9 @@
 
 * 截点有两种格式（见 cuts.py）。新格式（默认）：原话按 seq ≤ raw_seq（已入库提交成功的原话，不等整理），整理按 created_seq ≤ org_seq（整理结果和收据一次提交就算，不等步结束）。
   旧格式 {vclock, org_seq}：原话按 visible_at ≤ vclock（所属的步结束时才有），照旧，不换算成新格式。
+* 新话立刻能查：已入库的原话不等整理，按关键词（向量算好后也按向量）立即进检索；结果里没整理的原话在说明区标出（行带 unorganized），原话和材料正文不插字。
 * 本轮排除：scoped(exclude) 给出一个读取视图，把可信接头绑定的「当前这一轮」消息整条从快照里拿掉（原话、锚点、统计池、向量候选池、前后句、同回补料、按编号取、挂接查询都看不到）。
-  只排当前这一轮，同一会话里更早的原话（哪怕文字相同）照常可读。没有轮次上下文的读取（离线接口）不做本轮排除。续读游标里还没交的材料碰上要排除的消息，要求重新查询。
+  recall、便条和其他读取只排当前这一轮，同一会话里更早的原话（整理过的、没整理的，哪怕文字相同）照常可读。没有轮次上下文的读取（离线接口）不做本轮排除。续读游标里还没交的材料碰上要排除的消息，要求重新查询。
 * 历史检索的统计池（BM25）和向量候选池只含截点内的、没被排除的原话，不先全量建索引再过滤。混合模式缺任何一条向量就整次报缺，不退回关键词。
 * 出错不冒充空结果：缺向量、绑定不符、坏引用、坏游标、坏截点都返回可识别的错误。
 """
@@ -64,6 +65,9 @@ class Snapshot:
             gone = {s["msg_id"] for s in self.state["tables"]["sentences"]} - raw_ids
             if gone:
                 raise BadCut("截点的两个上界对不上：整理上界 %d 里的整理记录引用了 %d 条不在原话上界 %s 之内的原话" % (cut["org_seq"], len(gone), cut.get("raw_seq")))
+        # 按本次截点的整理收据认；不能把“没有挂到主线”误当成“还没处理”。
+        processed = {r["step_id"] for r in self.state["tables"]["receipts"] if r["kind"] == "step"}
+        unorganized = {r["msg_id"] for r in raw_rows if r.get("is_long") or r.get("step_id") not in processed}
         self.exclude = frozenset(exclude or ())
         self.excluded = self.exclude & raw_ids                          # 真的在这个截点里、被拿掉的
         self.rows = []
@@ -72,7 +76,8 @@ class Snapshot:
                 continue
             date = r["msg_time"][:10] if isinstance(r["msg_time"], str) and len(r["msg_time"]) >= 10 else None
             self.rows.append({"msg_id": r["msg_id"], "session_id": r["session_id"], "seq": r["seq"], "role": r["role"], "date": date, "content": r["content"],
-                              "msg_time": r["msg_time"], "fingerprint": r["fingerprint"], "is_long": r["is_long"], "redacted": r.get("redacted", 0)})
+                              "msg_time": r["msg_time"], "fingerprint": r["fingerprint"], "is_long": r["is_long"], "redacted": r.get("redacted", 0),
+                              "unorganized": r["msg_id"] in unorganized})
         self.by_id = {r["msg_id"]: r for r in self.rows}
         self.visible = set(self.by_id)
         self.anchors = RT.anchors_from_store_rows([a for a in anchor_rows if a["msg_id"] not in self.excluded])
@@ -480,10 +485,14 @@ def _chunk(r):
         ch["redacted"] = r["redacted"]
     if r.get("retrieval_reason"):
         ch["retrieval_reason"] = dict(r["retrieval_reason"])
+    if r.get("unorganized"):
+        ch["unorganized"] = True
     return ch
 
 
 def _mark(out, ch):
+    if ch.get("unorganized"):
+        out["unorganized"] = True
     if ch.get("retrieval_reason"):
         out["retrieval_reason"] = dict(ch["retrieval_reason"])
     if ch.get("redacted"):

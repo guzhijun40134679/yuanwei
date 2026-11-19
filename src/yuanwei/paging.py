@@ -62,6 +62,8 @@ def _recall_page(reader, d, cid, pos, off, path):
         text, delivered, npos, noff, _ = reader._render_page(chunks, pos, off, last_key, first_page, limit)
         cursor = "%s:%d:%d" % (cid, npos, noff) if npos < len(chunks) else None
         final = text + _tail("recall", cut, len(delivered), cursor, first_page, False)
+        mids = {d["msg_id"] for d in delivered}
+        final += RL.unorganized_notice([ch for ch in chunks if ch["msg_id"] in mids])
         ok, _d = H.fits(path, final)
         return ok, {"text": final, "delivered": delivered, "cursor": cursor}
     return _search_page(attempt, reader.cfg.page_chars_cap())
@@ -148,7 +150,7 @@ def _render_messages(res, cursor):
         if m["range"][0] > 0 or m["truncated"]:
             head += "（片段 %d–%d）" % (m["range"][0], m["range"][1])
         lines.append(head + m["text"])
-    return "\n".join(lines) + _tail("get_messages", res["cut"], len(res["messages"]), cursor, True, True)
+    return "\n".join(lines) + _tail("get_messages", res["cut"], len(res["messages"]), cursor, True, True) + RL.unorganized_notice(res["messages"])
 
 
 def get_messages_fit(reader, ids, before, after, cursor, path):

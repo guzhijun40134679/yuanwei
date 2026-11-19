@@ -113,7 +113,7 @@ def render(chosen_ids, rows_by_id, mp, rule_in_note, hint):
         lines = [NO_BODY_OPENING] + ([RULE_LINE] if rule_in_note else [])
     if hint:
         lines.append(hint)
-    return "\n".join(lines)
+    return "\n".join(lines) + RL.unorganized_notice(rows)
 
 
 def text_tokens(text, ruler=1):

@@ -7,6 +7,7 @@
 * DEPENDENCIES 是唯一的清单：doctor、兼容表第 9 节、测试都从它来。要依赖新东西，先加到这里。
 """
 import ast
+import hashlib
 import json
 import os
 import re
@@ -25,6 +26,10 @@ DEPENDENCIES = [
      "affects": ["bot_filter"], "if_changed": "没有这几个字段就当老宿主（0.20.0 那种），状态里标 legacy_no_author_field"},
     {"id": "host_sync_kwargs", "what": "宿主在每轮结束调 sync_all 时带 messages 和 turn_author", "where": "run_agent.py: _sync_external_memory_for_turn（含 .sync_all(...) 的函数）",
      "affects": ["write", "bot_filter"], "if_changed": "不带 messages：写入关掉；不带 turn_author：机器人作者过滤关掉"},
+    {"id": "memory_query_text", "what": "开始一轮前的 _memory_query_text／flatten_message_text 及其文字块规则与 v0.23.2 一致", "where": "agent/turn_context.py: _memory_query_text；agent/message_content.py: flatten_message_text 及辅助函数",
+     "affects": ["write"], "if_changed": "图片轮次的开始文字可能变了；先核新拍平规则，配不上时不记并显示原因"},
+    {"id": "memory_sync_text", "what": "同步前的 _summarize_user_message_for_log、图片块与 native 图片尾注构造规则与 v0.23.2 一致", "where": "agent/codex_responses_adapter.py: _summarize_user_message_for_log、_iter_content_parts 及类型集合；agent/image_routing.py: build_native_content_parts；gateway/session_api_media.py: restore_api_images",
+     "affects": ["write"], "if_changed": "图片标记或拼接规则可能变了；先核新拍平规则，不能靠剥掉字面标记放宽匹配"},
     {"id": "machinery_markers", "what": "宿主区分真人提问和自注入轮次的标记：用户行的 display_kind，和 _SYNTHETIC_USER_FLAGS 里的合成标记", "where": "agent/conversation_compression_scaffolding.py（v0.23.2 起）、agent/conversation_compression.py 或 agent/message_metadata.py（老版本）: _SYNTHETIC_USER_FLAGS；agent/context_compressor.py: display_kind",
      "affects": ["write"], "if_changed": "宿主多出来的、名字不以 _synthetic 结尾的合成标记我们认不出，会被当真人提问记下来：要把它加进 hermes_adapter.SYNTHETIC_USER_FLAGS"},
     {"id": "plugin_discovery", "what": "用户插件目录 $HERMES_HOME/plugins/<名字>/ 里的记忆提供者会被发现并加载（register_memory_provider）", "where": "plugins/plugin_loader.py（老版本在 plugins/memory/__init__.py）: get_hermes_home() / \"plugins\"；plugins/memory/__init__.py: register_memory_provider",
@@ -488,8 +493,46 @@ def _check_bots(rd):
     return out
 
 
+
+# 小修 38：只读源码 AST 指纹；不 import/执行宿主，不读配置。指纹包含两个拍平函数
+# 的纯辅助函数与类型集合；函数变化（包括未认识的新形状）必须重新核，不能只核名字。
+IMAGE_TEXT_CONTRACTS = {'agent/message_content.py': (['_NON_TEXT_PART_TYPES', '_TEXT_KEYS', '_field', '_text_from_part', 'flatten_message_text'], 'e944c2421954a691e549f077e1278c3b2546c0dd699f320225df0bd6e29d6926'), 'agent/turn_context.py': (['_memory_query_text'], '80dcae22be040f735eba8e3adf1750f2982352e6bac3d26a400461430b0f66db'), 'agent/codex_responses_adapter.py': (['_TEXT_PART_TYPES', '_IMAGE_PART_TYPES', '_nonempty_str', '_str_or_empty', '_part_type', '_iter_content_parts', '_summarize_user_message_for_log'], '23219f8667f68454824b2eea23c21f332083982784eab9f5aa3b1c67127fb9f0'), 'agent/image_routing.py': (['build_native_content_parts'], '749e912352669f80c0a966a0a8bf7e52b0c4e2faae39c9b86f61dc77ec9dc312'), 'gateway/session_api_media.py': (['restore_api_images'], '8f31ccdd86912673ce2b22cefa7d3fbd0d603c613fd887ec0f6a4b6a753f4040')}
+
+
+def _contract_shape(node):
+    if isinstance(node, ast.AST):
+        # 兼容 Python 3.10–3.14：空 type_params 是解析器加的字段，不是宿主行为。
+        return [type(node).__name__, [(k, _contract_shape(v)) for k, v in ast.iter_fields(node) if k != "type_params" or v]]
+    if isinstance(node, list):
+        return [_contract_shape(v) for v in node]
+    return node
+
+
+def _check_image_text(rd):
+    out = []
+    for dep_id, paths in (("memory_query_text", ("agent/message_content.py", "agent/turn_context.py")),
+                          ("memory_sync_text", ("agent/codex_responses_adapter.py", "agent/image_routing.py", "gateway/session_api_media.py"))):
+        missing, changed = [], []
+        for rel in paths:
+            tree, err = _parse(rd, rel)
+            if tree is None:
+                missing.append(rel)
+                continue
+            names, expected = IMAGE_TEXT_CONTRACTS[rel]
+            nodes = [n for n in tree.body if (n.name if isinstance(n, ast.FunctionDef) else
+                     n.targets[0].id if isinstance(n, ast.Assign) and isinstance(n.targets[0], ast.Name) else None) in names]
+            if len(nodes) != len(names):
+                missing.append(rel + "（函数或类型集合不全）")
+            elif hashlib.sha256(json.dumps(_contract_shape(nodes), ensure_ascii=True).encode()).hexdigest() != expected:
+                changed.append(rel)
+        status = "missing" if missing else "changed" if changed else "ok"
+        detail = ("没核：缺少或读不懂 " + "、".join(missing)) if missing else ("拍平规则变了，没核新行为：" + "、".join(changed)) if changed else "拍平函数及辅助规则与核过的 Hermes v0.23.2 一致（只读源码）"
+        out.append(_res(_dep(dep_id), status, detail))
+    return out
+
+
 def doctor_from_reader(rd, hermes_info=None):
-    checks = _check_base(rd) + _check_host(rd) + _check_install(rd) + _check_workspace(rd) + _check_lazy(rd) + _check_bots(rd) + _check_plugin_deps(rd) + _check_prefetch_limit(rd)
+    checks = _check_base(rd) + _check_host(rd) + _check_install(rd) + _check_workspace(rd) + _check_lazy(rd) + _check_bots(rd) + _check_plugin_deps(rd) + _check_prefetch_limit(rd) + _check_image_text(rd)
     order = {d["id"]: i for i, d in enumerate(DEPENDENCIES)}
     checks.sort(key=lambda c: order[c["id"]])
     summary = {s: sum(1 for c in checks if c["status"] == s) for s in ("ok", "changed", "missing")}

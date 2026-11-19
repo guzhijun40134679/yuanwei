@@ -199,11 +199,12 @@ def test_old_cursor_from_char_paging_is_rejected_and_config_change_is_too(tmp_pa
     assert cur and mem.recall(cursor=cur)["text"] == mem.recall(cursor=cur)["text"]
     cid = cur.split(":")[0]
     data = mem.store.get_cursor(cid)["data"]
-    assert data["paging_version"] == 2 and data["page_limit"] == {"tokens": 3000, "chars": None, "ruler": 2}
-    old = dict(data, paging_version=1, page_limit=30000)                        # 版本 1 的游标：按字符分页，页的量法变了
-    mem.store.update_cursor(cid, old)
-    with pytest.raises(BadCursor, match="重新查"):
-        mem.recall(cursor=cur)
+    assert data["paging_version"] == 3 and data["page_limit"] == {"tokens": 3000, "chars": None, "ruler": 2}  # 37：游标冻结未整理状态
+    for version in (1, 2):  # 1按字符分页；2还没有37要求的未整理状态
+        old = dict(data, paging_version=version)
+        mem.store.update_cursor(cid, old)
+        with pytest.raises(BadCursor, match="重新查"):
+            mem.recall(cursor=cur)
     mem.store.update_cursor(cid, data)
     assert mem.recall(cursor=cur)["text"]
     mem.cfg.recall_page_tokens = 4000                                           # 配置变了：页界会变，拒绝

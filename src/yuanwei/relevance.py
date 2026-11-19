@@ -87,3 +87,9 @@ def quote_prefix(row, role):
     if row.get("redacted"):
         parts.append("挡掉 %d 处" % row["redacted"])
     return "〔" + "｜".join(parts) + "〕"
+
+
+def unorganized_notice(rows):
+    """只放在工具/便条说明区；不写进原话或材料正文。编号按本页展示顺序列。"""
+    ids = list(dict.fromkeys(r["msg_id"] for r in rows if r.get("unorganized")))
+    return "\n——yuanwei｜未整理：" + "、".join(ids) if ids else ""

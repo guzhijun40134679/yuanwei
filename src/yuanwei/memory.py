@@ -220,6 +220,7 @@ class Memory:
         else:
             raise last
         return {"raw_saved": True, "pending": False, "readable": True, "duplicate": dup, "msg_id": row["msg_id"], "seq": row["seq"], "status": self._msg_status(row), "is_long": bool(row["is_long"]),
+                "readable_note": "已入库，可立即按关键词和编号读（向量算好后也按向量）；recall／便条只排当前这一轮，结果里标出未整理的",
                 "fingerprint": row["fingerprint"], "redacted": row.get("redacted", 0)}
 
     def _place(self, args, flush_errors):
@@ -1193,7 +1194,7 @@ class Memory:
         return dict({"status": "refused", "reason": reason, "text": refusal_text(reason, persistent), "persistent": persistent}, **extra)
 
     # 下面的 recall／get_messages／attachments／note 都可以另给 host、branch：和 session_id、turn_id 一起对上这个工作区里绑定过的那一轮，就排除这一轮的消息（只排当前这一轮；
-    # 同一会话里更早的原话照常可读）。host、session_id、turn_id 缺任何一个，就当没有轮次上下文：不做本轮排除。
+    # 同一会话里更早的原话，整理过的、没整理的，都照常可读）。host、session_id、turn_id 缺任何一个，就当没有轮次上下文：不做本轮排除。
     def _check_ver(self, dv0):
         """返回前再核一次：读取开始以后这个工作区发生过删除，就不交旧结果。"""
         if self.store.del_ver(self.ns) != dv0:
@@ -1318,6 +1319,7 @@ class Memory:
                 "abandoned_steps": by.get("abandoned", 0), "skipped_steps": by.get("skipped", 0), "done_steps": by.get("done", 0),
                 "long_unorganized": self.store.count_messages(self.ns, "is_long=1"), "paused": self.pause_state(),
                 "retrieval": {"mode": self.cfg.retrieval, "index_version": self.index_version, "vector_identity": self.vector_fp,
+                              "raw_visibility": "已入库原话可立即按关键词和编号读（向量算好后也按向量）；recall／便条只排当前这一轮，结果里标出未整理的",
                               "vectors": self.store.vector_count(self.vector_fp) if self.vector_fp else 0, "first_budget": self.cfg.first_budget,
                               "recall_budget": self.cfg.recall_budget, "total_budget": self.cfg.total_budget, "pool_cap": self.cfg.pool_cap, "neighbors": self.cfg.neighbors,
                               "relevance": self._relevance_status(), "query_timeout": VX.query_timeout_status(self.cfg.embedding)},

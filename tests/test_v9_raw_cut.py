@@ -30,7 +30,8 @@ def test_unsealed_original_is_readable_by_keyword_and_by_id(tmp_path):
     assert mem.message_status(ids[0]) == "已保存"
     out = mem.recall("葡萄")
     assert ids[0] in delivered_ids(out)
-    assert "还没整理" not in out["text"] and "未整理" not in out["text"]          # 交给回答模型的材料正文里不加「还没整理」的字样，只在工具元数据里写明
+    # 11-18 用户要求工具说明列出未整理编号；原话及材料正文仍不插字。
+    assert "未整理：" in out["text"] and "未整理" not in mem._reader.select("葡萄")["material"]
     assert mem.get_messages([ids[0]])["messages"][0]["msg_id"] == ids[0]
     a = mem.attachments(ids[0])
     assert a["organization"]["state"] == "no_receipt_in_cut" and "本截点尚无整理结果" in a["note"]

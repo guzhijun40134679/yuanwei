@@ -54,6 +54,61 @@ def _flatten(content):
     return ""
 
 
+def _image_sync_match(messages, sync_text):
+    """只凭真实图片块重建 Hermes 的同步文本；绝不剥掉用户字面的 [N images]。
+    Hermes v0.23.2 的类型和拼接契约由 doctor 核验。只取文字和图片数量，不读图片 URL/路径。
+    返回原文字、图片数量和已经核对过的行号；未知块保守不认。
+    """
+    for idx in range(len(messages) - 1, -1, -1):
+        row = messages[idx]
+        if not isinstance(row, dict) or row.get("role") != "user":
+            continue
+        # 最近的同文字普通行是字面输入，不能越过它借历史图片块解释这个标记。
+        if _flatten(row.get("content")) == sync_text:
+            return None
+        if not isinstance(row.get("content"), list):
+            continue
+        bits, count, supported = [], 0, True
+        for part in row["content"]:
+            if isinstance(part, str):
+                if part:
+                    bits.append(part)
+            elif isinstance(part, dict):
+                kind = str(part.get("type") or "").strip().lower()
+                if kind in ("image_url", "input_image"):
+                    count += 1
+                elif kind in ("text", "input_text", "output_text") and isinstance(part.get("text"), str):
+                    if part["text"]:
+                        bits.append(part["text"])
+                else:
+                    supported = False
+            else:
+                supported = False
+        text = "\n".join(bits)
+        if supported and not count and text.strip() == sync_text:
+            return None
+        if not supported or not count:
+            continue
+        marker = "[%d image%s]" % (count, "" if count == 1 else "s")
+        expected = " ".join(bit for bit in (marker, text.strip()) if bit)
+        if sync_text == expected:
+            return text, count, idx
+    return None
+
+
+
+def _without_native_image_hints(text, count):
+    """已证实有图片块后，只移走 native builder 追加的末尾 N 条完整路径提示。
+    用户较早的同名字面提示保持；默认英文问句不能与真实输入区分，保留。
+    手工构造与宿主完全同构的 payload 仍不可认证，不能把此规则称为来源签名。
+    """
+    caption, separator, suffix = text.rpartition("\n\n")
+    hints = suffix.split("\n")
+    if separator and len(hints) == count and all(re.fullmatch(r"\[Image attached(?: at)?: [^\r\n]+\]", line) for line in hints):
+        return caption
+    return text
+
+
 def _machinery(row):
     if row.get("display_kind"):
         return True
@@ -223,15 +278,14 @@ class HermesAdapter:
         return None if r["allowed"] else (r["denied_by"][0]["scope"] if r["denied_by"] else "workspace")
 
     def _surface_for(self, key):
-        """别的工作区的读取面：权限（轮次、口令、来源）借当前工作区这一边的登记，数据读它自己的库；日志记在当前这一轮名下。"""
+        """别区读取借当前轮许可，另核来源设置；来源记交付证据，当前区只记无内容的活动计数。"""
         if key in self._surfaces:
             return self._surfaces[key]
         if not self._ws_exists(key):
             return None
         m = self._open(key)
-        borrowed = Access(m)
-        borrowed.store, borrowed.ns, borrowed.mem = self.acc.store, self.acc.ns, self.acc.mem
-        borrowed.windows = self.acc.windows                                                  # 一次读多个工作区：用同一份窗口状态
+        from .cross_recall import SourceAccess
+        borrowed = SourceAccess(m, self.acc, mirror_owner=True)      # 来源日志+owner活动计数；仍核来源禁读和删除版本
         sf = ToolSurface(m, borrowed, H.profile(HOST), self.ids)
         self._surfaces[key] = sf
         return sf
@@ -728,7 +782,13 @@ class HermesAdapter:
             pass
 
     def sync_turn(self, user_content, assistant_content, *, session_id="", messages=None, turn_author=None):
-        if not self.active or not isinstance(user_content, str) or not user_content.strip():
+        if not self.active:
+            return
+        if not isinstance(user_content, str):
+            self._skip("unsupported_user_content")
+            return
+        if not user_content.strip():
+            self._skip("empty_user_content")
             return
         if self.ws["key"] is None:
             self._skip("workspace_unresolved")                                               # 认不出工作区：不写，也不落进生活或别的项目
@@ -736,9 +796,20 @@ class HermesAdapter:
         if not self._on("write"):                                                           # 宿主的 sync_turn 没有 messages：没法核这一轮是不是自注入的，写入这一项关掉
             self._skip("feature_off_write")
             return
-        fp = Access.text_fp(user_content)
+        if messages is None:
+            self._skip("no_messages")
+            return
+        if not isinstance(messages, list) or not messages:
+            self._skip("current_user_row_not_found")
+            return
+        image = _image_sync_match(messages, user_content)
+        original_text = image[0] if image else user_content
+        fp = Access.text_fp(original_text)
         with self._lock:
             ent, owner = None, None
+            if image and sum(e["fp"] == fp for entries in self._pending.values() for e in entries) > 1:
+                self._skip("ambiguous_pending_turn")
+                return
             for sid in [session_id] + [s for s in self._pending if s != session_id]:
                 for e in self._pending.get(sid, []):
                     if e["fp"] == fp:
@@ -759,16 +830,17 @@ class HermesAdapter:
         if isinstance(turn_author, dict) and turn_author.get("is_bot"):
             self._skip("bot_author")
             return
-        if messages is None:
-            self._skip("no_messages")
-            return
-        why = self._machinery_check(messages, user_content)
+        why = self._machinery_check(messages, user_content, image_index=image[2] if image else None)
         if why:
             self._skip(why)
             return
         sid = session_id or owner
         uid = "%s-u" % ent["token"]
         t = _now()
+        if image:
+            # 原文字逐字符保留；图片仅留数量，给后续多模态接入一个明确的文本占位。
+            caption = _without_native_image_hints(original_text, image[1])
+            user_content = (caption + "\n" if caption else "") + "〔带 %d 张图〕" % image[1]
         try:
             r = self.mem.record(HOST, sid, uid, "user", user_content, time=t, turn_id=ent["token"], capture=ent.get("capture"))            # 绑定这一轮：之后这一轮的读取把它排除，不当历史交回来
             if r.get("blocked"):                                                             # 被删除屏障挡住（确认删除那一轮、删除前开始的迟到写入）：不记
@@ -783,10 +855,10 @@ class HermesAdapter:
         self._dump_status()
 
     @staticmethod
-    def _machinery_check(messages, user_text):
+    def _machinery_check(messages, user_text, image_index=None):
         want = user_text.replace("\r\n", "\n").strip()
-        idx = None
-        for i in range(len(messages) - 1, -1, -1):
+        idx = image_index
+        for i in range(len(messages) - 1, -1, -1) if idx is None else ():
             m = messages[i]
             if isinstance(m, dict) and m.get("role") == "user" and _flatten(m.get("content")).replace("\r\n", "\n").strip() == want:
                 idx = i

@@ -195,10 +195,14 @@ def test_partial_finish_failure_marks_prior_source_as_not_delivered(tmp_path,mon
 def test_empty_cross_result_rechecks_every_source_permission(tmp_path,monkeypatch):
     from test_hermes_workspace import call
     world,a=cross_world(tmp_path)
-    foreign=world.mem('proj:p-b');original=foreign._reader.select_multi
-    def deny_after(*args,**kwargs):
-        out=original(*args,**kwargs);foreign.set_read_permission(False);return out
-    monkeypatch.setattr(foreign._reader,'select_multi',deny_after)
+    from yuanwei.reader import Reader
+    foreign=world.mem('proj:p-b');original=Reader.select_multi
+    def deny_after(reader,*args,**kwargs):
+        out=original(reader,*args,**kwargs)
+        if reader.ns == foreign.ns:
+            foreign.set_read_permission(False)
+        return out
+    monkeypatch.setattr(Reader,'select_multi',deny_after)  # 37：拦实际会话读取视图，仍在来源搜索后撤权
     result=call(a,'recall',{'query':'spektralab'})
     assert result['status']=='refused'
 
