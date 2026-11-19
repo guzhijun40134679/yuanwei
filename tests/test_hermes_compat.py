@@ -8,7 +8,7 @@ import textwrap
 
 import pytest
 
-from hermes_image_contract import SOURCES as IMAGE_SOURCES
+from hermes_image_contract import DOCTOR_SOURCES as IMAGE_SOURCES
 from yuanwei import cli
 from yuanwei import hermes_compat as HC
 

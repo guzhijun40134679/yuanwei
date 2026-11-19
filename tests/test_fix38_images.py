@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from hermes_image_contract import SOURCES
+from hermes_image_contract import DOCTOR_SOURCES, SOURCES
 from test_hermes_adapter import mk, stored, turn
 from yuanwei import hermes_compat as HC
 
@@ -107,7 +107,7 @@ def test_image_turn_rejections_have_status_reason(tmp_path, messages, reason):
 
 
 def test_doctor_checks_both_image_text_contracts():
-    result = HC.doctor_from_reader(SOURCES.get)
+    result = HC.doctor_from_reader(DOCTOR_SOURCES.get)
     checks = {c['id']: c for c in result['checks']}
     assert checks['memory_query_text']['status'] == 'ok'
     assert checks['memory_sync_text']['status'] == 'ok'
@@ -119,7 +119,7 @@ def test_doctor_checks_both_image_text_contracts():
     ('agent/codex_responses_adapter.py', 'image_count = len(parts) - len(text_bits)', 'image_count = 0', 'memory_sync_text'),
 ])
 def test_doctor_reports_changed_image_contract(rel, old, new, dep):
-    sources = dict(SOURCES)
+    sources = dict(DOCTOR_SOURCES)
     assert old in sources[rel]
     sources[rel] = sources[rel].replace(old, new)
     checks = {c['id']: c for c in HC.doctor_from_reader(sources.get)['checks']}
@@ -228,7 +228,7 @@ def test_incomplete_or_count_mismatched_native_looking_text_is_preserved(tmp_pat
 
 
 def test_doctor_detects_changed_native_hint_builder():
-    sources = dict(SOURCES)
+    sources = dict(DOCTOR_SOURCES)
     sources['agent/image_routing.py'] = sources['agent/image_routing.py'].replace('[Image attached at:', '[New image marker:')
     checks = {c['id']: c for c in HC.doctor_from_reader(sources.get)['checks']}
     assert checks['memory_sync_text']['status'] == 'changed'

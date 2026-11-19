@@ -549,7 +549,7 @@ def apply_uninstall(hermes_home, host_reloaded=False, dry_run=False, hermes_cmd=
             p.unlink()
         steps.append({"step": "delete:" + rel, "status": "would_delete" if dry_run else "deleted"})
         changed = True
-    for name in ("status.json", "owner-skips.json", "owner-skips.lock"):
+    for name in ("status.json", "owner-skips.json", "owner-skips.lock", "skip-reasons.json", "skip-reasons.lock"):
         st_file = h / "yuanwei" / name                                               # 原委运行计数；只在宿主重载后删，不动库和工作区名字
         if st_file.exists() and not kept:
             if not dry_run:
@@ -761,6 +761,10 @@ def install_status(hermes_home, sys_=None, hermes_python=None):
         out["runtime"] = None
     if out["runtime"] is None:
         notes.append("还没有运行时的数（Hermes 还没加载过插件，或加载后没有对话）")
+    from . import skipreasons as SK                                                # 写入跳过的原因，按库累计（Hermes 每一轮新起实例，status.json 的 skipped 会被冲掉）；只有原因、次数、时间
+    out["skip_reasons"] = SK.read(str(h))
+    if out["skip_reasons"]["problem"]:
+        notes.append("跳过原因的累计文件读不了（%s），不能当作没有跳过；原文件没有改动。" % out["skip_reasons"]["problem"])
     if sys_ is not None:
         try:
             from . import embedsetup as ES

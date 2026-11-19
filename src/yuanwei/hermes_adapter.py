@@ -28,6 +28,7 @@ from . import hermes_profile as HP
 from . import hermes_workspace as HW
 from . import hosts as H
 from . import owners as OW
+from . import skipreasons as SK
 from . import window as WN
 from .access import Access
 from .config import Config
@@ -54,11 +55,69 @@ def _flatten(content):
     return ""
 
 
+_HINT_LINE = re.compile(r"\[Image attached(?: at)?: [^\r\n]+\]")
+
+
+def _split_native_hints(text, count):
+    """文字末尾恰好是 Hermes 追加的 N 行完整图片提示（前面隔一个空行）：返回提示前面的字；不是这个格式返回 None。"""
+    caption, separator, suffix = text.rpartition("\n\n")
+    hints = suffix.split("\n")
+    if separator and len(hints) == count and all(_HINT_LINE.fullmatch(line) for line in hints):
+        return caption
+    return None
+
+
+def _hinted_row_match(messages, sync_text):
+    """只看最近的那一条用户行（不往回借历史行）。Hermes v0.23.2 真机上带图的一轮，这一行是列表：一个文字块「字＋空行＋每张图一行提示」加 N 个图片块；
+    记忆那头拿到的不是 0.1.0a5 假定的「[N image(s)] 字」，而是下面两种（复现见交回报告）：
+    * 附件路由（persist_user_message 是用户打的字）：开始和同步都是用户打的字，不带提示；
+    * API 会话：开始和同步都是和这一行文字块完全一样的「字＋提示」。
+    只认这两种、只认恰好 N 行完整提示；对不上返回 None，由调用方记原因。返回（开始登记用的原文字、图片数、行号、要存的字）。"""
+    for idx in range(len(messages) - 1, -1, -1):
+        row = messages[idx]
+        if not isinstance(row, dict) or row.get("role") != "user":
+            continue
+        if not isinstance(row.get("content"), list):
+            return None
+        bits, count = [], 0
+        for part in row["content"]:
+            if isinstance(part, str):
+                if part:
+                    bits.append(part)
+            elif isinstance(part, dict):
+                kind = str(part.get("type") or "").strip().lower()
+                if kind in ("image_url", "input_image"):
+                    count += 1
+                elif kind in ("text", "input_text", "output_text") and isinstance(part.get("text"), str):
+                    if part["text"]:
+                        bits.append(part["text"])
+                else:
+                    return None
+            else:
+                return None
+        if not count or len(bits) != 1:                                # 没有图片块，或文字块不止一个（宿主追加的别的文字块认不出来，不猜）
+            return None
+        text = bits[0]
+        caption = _split_native_hints(text, count)
+        if caption is None:
+            return None
+        if sync_text == text:                                          # API 会话：两头都带提示；提示不存
+            return text, count, idx, caption
+        if sync_text.strip() == caption:                               # 附件路由：记忆那头是用户打的字（宿主构造函数会去掉两头空白，记忆那头没去；逐字存记忆那头的）
+            return sync_text, count, idx, sync_text
+        return None
+    return None
+
+
 def _image_sync_match(messages, sync_text):
     """只凭真实图片块重建 Hermes 的同步文本；绝不剥掉用户字面的 [N images]。
     Hermes v0.23.2 的类型和拼接契约由 doctor 核验。只取文字和图片数量，不读图片 URL/路径。
-    返回原文字、图片数量和已经核对过的行号；未知块保守不认。
+    返回（开始登记用的原文字、图片数量、已经核对过的行号、要存的字）；未知块保守不认。
+    先看最近那一行是不是真机上的两种带提示形状（_hinted_row_match）；不是再按 0.1.0a5 的「同一份列表两头用」认。
     """
+    hit = _hinted_row_match(messages, sync_text)
+    if hit:
+        return hit
     for idx in range(len(messages) - 1, -1, -1):
         row = messages[idx]
         if not isinstance(row, dict) or row.get("role") != "user":
@@ -92,7 +151,7 @@ def _image_sync_match(messages, sync_text):
         marker = "[%d image%s]" % (count, "" if count == 1 else "s")
         expected = " ".join(bit for bit in (marker, text.strip()) if bit)
         if sync_text == expected:
-            return text, count, idx
+            return text, count, idx, _without_native_image_hints(text, count)
     return None
 
 
@@ -763,6 +822,7 @@ class HermesAdapter:
     # ---------------------------------------------------------------- 写入（只写当前那个工作区）
     def _skip(self, why):
         self.skipped[why] = self.skipped.get(why, 0) + 1
+        SK.record(self._home, why)                                                       # Hermes 每一轮新起一个实例，实例里的计数会被冲掉；原因另按库累计一份（只有原因和时间）
         self._dump_status()
 
     def _dump_status(self):
@@ -839,7 +899,7 @@ class HermesAdapter:
         t = _now()
         if image:
             # 原文字逐字符保留；图片仅留数量，给后续多模态接入一个明确的文本占位。
-            caption = _without_native_image_hints(original_text, image[1])
+            caption = image[3]
             user_content = (caption + "\n" if caption else "") + "〔带 %d 张图〕" % image[1]
         try:
             r = self.mem.record(HOST, sid, uid, "user", user_content, time=t, turn_id=ent["token"], capture=ent.get("capture"))            # 绑定这一轮：之后这一轮的读取把它排除，不当历史交回来

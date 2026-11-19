@@ -28,8 +28,8 @@ DEPENDENCIES = [
      "affects": ["write", "bot_filter"], "if_changed": "不带 messages：写入关掉；不带 turn_author：机器人作者过滤关掉"},
     {"id": "memory_query_text", "what": "开始一轮前的 _memory_query_text／flatten_message_text 及其文字块规则与 v0.23.2 一致", "where": "agent/turn_context.py: _memory_query_text；agent/message_content.py: flatten_message_text 及辅助函数",
      "affects": ["write"], "if_changed": "图片轮次的开始文字可能变了；先核新拍平规则，配不上时不记并显示原因"},
-    {"id": "memory_sync_text", "what": "同步前的 _summarize_user_message_for_log、图片块与 native 图片尾注构造规则与 v0.23.2 一致", "where": "agent/codex_responses_adapter.py: _summarize_user_message_for_log、_iter_content_parts 及类型集合；agent/image_routing.py: build_native_content_parts；gateway/session_api_media.py: restore_api_images",
-     "affects": ["write"], "if_changed": "图片标记或拼接规则可能变了；先核新拍平规则，不能靠剥掉字面标记放宽匹配"},
+    {"id": "memory_sync_text", "what": "同步前的 _summarize_user_message_for_log、图片块与 native／API 图片提示（含默认问句）构造规则，和交给记忆的那句话（original_user_message 取 persist_user_message）的取法，与 v0.23.2 一致", "where": "agent/codex_responses_adapter.py: _summarize_user_message_for_log、_iter_content_parts 及类型集合；agent/image_routing.py: build_native_content_parts；gateway/session_api_media.py: restore_api_images；agent/turn_context.py: build_turn_context 里的 original_user_message = persist_user_message if … else user_message",
+     "affects": ["write"], "if_changed": "图片标记、图片提示的拼接或交给记忆的那句话的取法可能变了；配不上的带图轮次不记并显示原因，先核新形状再改，不能靠放宽匹配"},
     {"id": "machinery_markers", "what": "宿主区分真人提问和自注入轮次的标记：用户行的 display_kind，和 _SYNTHETIC_USER_FLAGS 里的合成标记", "where": "agent/conversation_compression_scaffolding.py（v0.23.2 起）、agent/conversation_compression.py 或 agent/message_metadata.py（老版本）: _SYNTHETIC_USER_FLAGS；agent/context_compressor.py: display_kind",
      "affects": ["write"], "if_changed": "宿主多出来的、名字不以 _synthetic 结尾的合成标记我们认不出，会被当真人提问记下来：要把它加进 hermes_adapter.SYNTHETIC_USER_FLAGS"},
     {"id": "plugin_discovery", "what": "用户插件目录 $HERMES_HOME/plugins/<名字>/ 里的记忆提供者会被发现并加载（register_memory_provider）", "where": "plugins/plugin_loader.py（老版本在 plugins/memory/__init__.py）: get_hermes_home() / \"plugins\"；plugins/memory/__init__.py: register_memory_provider",
@@ -508,6 +508,21 @@ def _contract_shape(node):
     return node
 
 
+# 小修 38 补：宿主在 build_turn_context 里把「交给记忆的那句话」（开始登记和同步都用它）定成 persist_user_message，没有才用发给模型的那份。
+# 这一行在大函数里，只按这一条语句的 AST 指纹核；找不到或变了，就不能再相信「记忆那头拿到的是用户打的字或一模一样的字＋提示」。
+PERSIST_LINE_HASH = "9f56889f971af600f4b459e2eadfc02999776f76c01d398c39c9f53bcac5c7b1"
+
+
+def _persist_line(tree):
+    """build_turn_context 里 original_user_message 的赋值语句（只认唯一一条）的指纹；找不到返回 None，多于一条返回 "multiple"。"""
+    nodes = [n for n in ast.walk(tree) if isinstance(n, ast.Assign) and any(isinstance(t, ast.Name) and t.id == "original_user_message" for t in n.targets)]
+    if not nodes:
+        return None
+    if len(nodes) > 1:
+        return "multiple"
+    return hashlib.sha256(json.dumps(_contract_shape([nodes[0]]), ensure_ascii=True).encode()).hexdigest()
+
+
 def _check_image_text(rd):
     out = []
     for dep_id, paths in (("memory_query_text", ("agent/message_content.py", "agent/turn_context.py")),
@@ -525,8 +540,15 @@ def _check_image_text(rd):
                 missing.append(rel + "（函数或类型集合不全）")
             elif hashlib.sha256(json.dumps(_contract_shape(nodes), ensure_ascii=True).encode()).hexdigest() != expected:
                 changed.append(rel)
+        if dep_id == "memory_sync_text":                                                       # 交给记忆的那句话取 persist_user_message 的那一行（agent/turn_context.py）
+            tree, err = _parse(rd, "agent/turn_context.py")
+            line = _persist_line(tree) if tree is not None else None
+            if line is None:
+                missing.append("agent/turn_context.py（找不到 original_user_message 取 persist_user_message 的那一行）")
+            elif line != PERSIST_LINE_HASH:
+                changed.append("agent/turn_context.py（original_user_message 的取法）")
         status = "missing" if missing else "changed" if changed else "ok"
-        detail = ("没核：缺少或读不懂 " + "、".join(missing)) if missing else ("拍平规则变了，没核新行为：" + "、".join(changed)) if changed else "拍平函数及辅助规则与核过的 Hermes v0.23.2 一致（只读源码）"
+        detail = ("没核：缺少或读不懂 " + "、".join(missing)) if missing else ("拍平规则或交给记忆的那句话的取法变了，没核新行为：" + "、".join(changed)) if changed else "拍平函数、图片提示和默认问句的构造、交给记忆的那句话的取法，与核过的 Hermes v0.23.2 一致（只读源码）"
         out.append(_res(_dep(dep_id), status, detail))
     return out
 
