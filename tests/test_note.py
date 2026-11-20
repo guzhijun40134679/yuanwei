@@ -129,7 +129,7 @@ def test_fitter_stop_versus_skip_on_an_oversized_candidate():
     assert skip["选中"] == ["s1", "s3"] and skip_f.skipped == ["big"]
 
 
-def test_fitter_both_limits_apply_and_conflict_chars_are_not_oversize():
+def test_fitter_both_limits_apply_and_replacement_chars_in_quote_are_delivered():           # 0.1.0a7：原话里本来就有替代字符的照常装，不再记冲突
     from yuanwei import encoding as EN
     mp = EN.load_mapping()
     rep = mp.rep_chars[0]
@@ -139,7 +139,7 @@ def test_fitter_both_limits_apply_and_conflict_chars_are_not_oversize():
     seq = [("a", None, True), ("c", None, True), ("b", None, True)]
     f = NT.NoteFitter([(10 ** 6, 10 ** 6)], "stop", mp, False)
     r = f(seq, rows, mp, 0)
-    assert r["选中"] == ["a", "b"] and f.conflicts == ["c"] and r["停在"] is None
+    assert r["选中"] == ["a", "c", "b"] and f.conflicts == [] and r["停在"] is None
     meter = NT.NoteMeter(rows, mp, False)
     t, ch = meter.totals(["a"])
     only_chars = NT.NoteFitter([(10 ** 6, ch)], "stop", mp, False)(seq, rows, mp, 0)           # 字符上限卡住，估算词元很宽

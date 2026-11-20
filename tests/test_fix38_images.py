@@ -32,7 +32,7 @@ def test_image_turn_records_original_text_and_answer(tmp_path, text, count):
     a.sync_turn(f['_summarize_user_message_for_log'](image, sep='\n'), '这是截图测试回答',
                 session_id='hs1', messages=[{'role': 'user', 'content': image}])
     rows = stored(mem)
-    expected = (text + '\n' if text else '') + '〔带 %d 张图〕' % count
+    expected = (text + '\n' if text else '') + '（带 %d 张图）' % count
     assert rows == [('hs1', 'user', expected), ('hs1', 'assistant', '这是截图测试回答')]
     assert a.recorded_turns == 1
     assert '/synthetic/cache' not in str(rows)
@@ -152,7 +152,7 @@ def test_image_with_literal_marker_in_its_text_keeps_that_text(tmp_path):
     image = content(text)
     turn(a, 1, text)
     a.sync_turn('[1 image] ' + text, '回答', session_id='hs1', messages=[{'role': 'user', 'content': image}])
-    assert stored(mem)[0][2] == text + '\n〔带 1 张图〕'
+    assert stored(mem)[0][2] == text + '\n（带 1 张图）'
     a.shutdown()
 
 
@@ -183,7 +183,7 @@ def test_actual_native_builder_cache_hints_are_not_stored(tmp_path, text, count)
     turn(a, 1, f['_memory_query_text'](image))
     a.sync_turn(f['_summarize_user_message_for_log'](image, sep='\n'), '图片回复', session_id='hs1',
                 messages=[{'role': 'user', 'content': image}])
-    assert stored(mem)[0][2] == text + '\n〔带 %d 张图〕' % count
+    assert stored(mem)[0][2] == text + '\n（带 %d 张图）' % count
     assert 'synthetic-image' not in str(stored(mem))
     a.shutdown()
 
@@ -196,7 +196,7 @@ def test_native_image_only_keeps_indistinguishable_host_default_caption(tmp_path
     a.sync_turn(f['_summarize_user_message_for_log'](image, sep='\n'), '图片回复', session_id='hs1',
                 messages=[{'role': 'user', 'content': image}])
     # 宿主丢掉了“用户空输入还是逐字输入默认句”的区别；保留可能的原字，不冒充恢复了空输入。
-    assert stored(mem)[0][2] == 'What do you see in this image?\n〔带 1 张图〕'
+    assert stored(mem)[0][2] == 'What do you see in this image?\n（带 1 张图）'
     assert 'synthetic-image' not in str(stored(mem))
     a.shutdown()
 
@@ -209,7 +209,7 @@ def test_native_remote_image_hint_removed_but_caption_url_kept(tmp_path):
     turn(a, 1, f['_memory_query_text'](image))
     a.sync_turn(f['_summarize_user_message_for_log'](image, sep='\n'), '回复', session_id='hs1',
                 messages=[{'role': 'user', 'content': image}])
-    assert stored(mem)[0][2] == text + '\n〔带 1 张图〕'
+    assert stored(mem)[0][2] == text + '\n（带 1 张图）'
     a.shutdown()
 
 
@@ -223,7 +223,7 @@ def test_incomplete_or_count_mismatched_native_looking_text_is_preserved(tmp_pat
     turn(a, 1, f['_memory_query_text'](image))
     a.sync_turn(f['_summarize_user_message_for_log'](image, sep='\n'), '回复', session_id='hs1',
                 messages=[{'role': 'user', 'content': image}])
-    assert stored(mem)[0][2] == text + '\n〔带 1 张图〕'
+    assert stored(mem)[0][2] == text + '\n（带 1 张图）'
     a.shutdown()
 
 

@@ -23,7 +23,7 @@ from . import vectors as VX
 
 FUTURE_HOSTS = ("claude-code", "codex", "pi")
 NEW_FLAGS = ("preset", "provider", "provider_url", "provider_model", "provider_param", "api_key_env", "vectors", "embedding_model", "embedding_url", "download_model", "allow_remote_embedding",
-             "install_numpy", "hermes_python", "ollama_cmd", "lms_cmd", "ignore_probe_failure", "try_key", "engine_url", "model_url", "model_file", "engine_dir")
+             "install_numpy", "hermes_python", "ollama_cmd", "lms_cmd", "ignore_probe_failure", "try_key", "engine_url", "model_url", "model_file", "engine_dir", "no_organize")
 
 
 class Cancel(Exception):
@@ -114,6 +114,11 @@ def _check_url(url, local_only, what):
         _refuse("insecure_url", "%s 的地址不在本机，只许 https://" % what)
 
 
+def _organize_arg(a):
+    """--no-organize 给了就是关（False）；没给是 None＝没表态：重装时沿用已有设置里的开关（没有就是开），不会悄悄把用户关掉的整理又打开。"""
+    return False if getattr(a, "no_organize", False) else None
+
+
 def resolve_args(a, sys_=None):
     """不问话的写法：把参数变成选择（choices）。缺什么、不合规就报 SetupRefused（退出码 2），不猜。"""
     if a.host in FUTURE_HOSTS:
@@ -163,7 +168,7 @@ def resolve_args(a, sys_=None):
         for k in ("engine_url", "model_url"):
             if vec[k] and not str(vec[k]).lower().startswith("https://"):
                 _refuse("not_https", "--%s 只许 https 地址" % k.replace("_", "-"))
-        return {"host": "hermes", "preset": preset, "provider": prov, "vectors": vec, "key": {"choice": "env_or_file", "value": None, "test": False}}
+        return {"host": "hermes", "preset": preset, "provider": prov, "vectors": vec, "key": {"choice": "env_or_file", "value": None, "test": False}, "organize": _organize_arg(a)}
     if vm == "custom" and not (a.embedding_url and a.embedding_model):
         _refuse("missing_embedding_fields", "--vectors custom 要同时给 --embedding-url 和 --embedding-model")
     if vm != "none":
@@ -176,7 +181,7 @@ def resolve_args(a, sys_=None):
             _refuse("not_local", "全本机预设的向量服务只许本机地址")
         if not VX.is_local_url(vec["url"]):
             _check_url(vec["url"], False, "向量服务")
-    return {"host": "hermes", "preset": preset, "provider": prov, "vectors": vec, "key": {"choice": "env_or_file", "value": None, "test": False}}
+    return {"host": "hermes", "preset": preset, "provider": prov, "vectors": vec, "key": {"choice": "env_or_file", "value": None, "test": False}, "organize": _organize_arg(a)}
 
 
 # ================================================================ 检查环境、做计划（只读）
@@ -372,6 +377,9 @@ def build_lines(ch, home, db, plan, key, vp, env=None):
     comp = ((env or {}).get("hermes") or {}).get("compat")
     if comp and comp.get("exit_code"):
         L.append("             和 Hermes 的接口核对：有 %d 项和原委预期不一样（%s）：先别装，这是原委要跟进的事" % (len(comp.get("changed") or []), "、".join(comp.get("changed") or []) or comp.get("error") or "?"))
+    if ch.get("organize") is False:
+        L.append(" 整理        关（不整理）：不发请求、不花钱、不需要整理用的密钥；原话、索引、向量照常，查回来的原话不挂「未整理」。以后想打开：yuanwei organize on --yes（关着时封好的步会按顺序补）")
+        return _build_lines_rest(L, ch, home, db, plan, vp, env)
     pr = " · ".join("%s=%s" % (k, json.dumps(v, ensure_ascii=False)) for k, v in prov["params"].items())
     L.append(" 整理        %s · %s 〔%s〕 · 参数 %s" % (prov["name"], prov["model"], prov["label"], pr))
     priced = CT.price(prov["model"]) if prov["model"] else None
@@ -388,6 +396,12 @@ def build_lines(ch, home, db, plan, key, vp, env=None):
     L.append("             密钥：%s" % src)
     if ch["key"]["choice"] == "enter":
         L.append("             密钥：确认后存进原委的全局密钥文件 %s（权限只有你能读；几个机器人共用这一份）" % (key.get("global_path") or KS.global_key_file(key["env"])))
+    return _build_lines_rest(L, ch, home, db, plan, vp, env)
+
+
+def _build_lines_rest(L, ch, home, db, plan, vp, env):
+    """计划的后半段（向量、库、读取范围、文件）；整理那几行（供应商、密钥）在 build_lines 里，整理关着时没有。"""
+    vec = ch["vectors"]
     if vec["mode"] == "none":
         L.append(" 向量        不开（只用关键词；以后可以 yuanwei vectors setup）")
     elif vec["mode"] == "llamacpp":
@@ -485,7 +499,19 @@ def build_toml(ch, home, identity=None, weak=False, query_timeout=10):
         top = {"retrieval": "hybrid", "vector_fallback": "partial"}
         tables["embedding"] = {"base_url": vec["url"], "model": vec["model"], "runtime": vec["mode"], "timeout_query": query_timeout, "timeout_worker": 60, "backfill_batch": 16, "breaker_seconds": 30,
                                "worker_max_run_seconds": 600, "allow_remote": bool(vec["allow_remote"]) if not VX.is_local_url(vec["url"]) else None, "weak_identity": bool(weak), "identity": identity}
+    if ch.get("organize") is False:                                           # 整理关着才写这一行（默认开着不写，没动这个开关的人配置文件一个字不变）；放在顶层最后，和 yuanwei organize off 改出来的逐字一样
+        top = dict(top, organize=False)
     return to_toml(top, tables)
+
+
+def _preserved_organize(toml_path):
+    """已有的 yuanwei.toml 里整理开关是什么：关着返回 False；没有、开着、读不了都返回 True（默认开）。"""
+    try:
+        import tomllib
+        with open(toml_path, "rb") as f:
+            return tomllib.load(f).get("organize", True) is not False
+    except (OSError, ValueError):
+        return True
 
 
 def _preserved_query_timeout(ch, toml_path):
@@ -542,6 +568,8 @@ def make_plan(ch, sys_, home, args, hermes_cmd):
     key = key_state(sys_, home, ch["provider"])
     toml_path = os.path.join(home, "yuanwei", "yuanwei.toml")
     user_cfg = getattr(args, "config_path", None)
+    if ch.get("organize") is None:                                              # 没表态（没给 --no-organize）：沿用已有设置里的开关，重装不会悄悄把关掉的整理又打开
+        ch["organize"] = _preserved_organize(toml_path)
     toml_text = None if user_cfg else _planned_toml(ch, home, vp, toml_path)          # 计划阶段先算好新内容，和已有文件比；向量的编码身份要核验以后才知道，已有的设置里选择没变就沿用它的身份来比（核验后身份若变了，那时才更新并备份）
     kw = dict(hermes_home=home, db=args.db, read_scope=args.read_scope, owners=_owners(args), mode=args.mode, src_path=args.src_path, replace_provider=args.replace_provider,
               config_path=user_cfg or toml_path, spawn=args.spawn, hermes_cmd=hermes_cmd, config_method=args.config_method, toml_text=toml_text)
@@ -633,7 +661,7 @@ def apply_plan(ch, pl, sys_, home, args, io=None):
             _refuse("verify_failed", "向量核验没通过（%s%s）。没改任何配置。" % (res["reason"], "，维度 %s" % res["dimension"] if res.get("dimension") else ""))
         identity, weak, weak_reasons, tested = res["identity"], res["weak"], list(res.get("weak_reasons") or []), res.get("tested")
         steps.append("verify")
-    if prov["id"] == "local" and not getattr(args, "ignore_probe_failure", False):
+    if prov["id"] == "local" and ch.get("organize") is not False and not getattr(args, "ignore_probe_failure", False):          # 整理关着：本机大模型不会被用来整理，不探它
         r = ES.long_input_probe(sys_, prov["base_url"], prov["model"], prov["params"])
         if r != "ok":
             _refuse("long_input_probe_failed", "本机大模型的长输入探针没通过（%s）：它可能会悄悄把很长的输入截掉，整理会乱。请调大它的上下文长度，或加 --ignore-probe-failure 自己承担。没改任何配置。" % r)
@@ -801,10 +829,13 @@ def interactive(args, io, sys_, home, hermes_cmd):
     if preset["provider"] in ("deepseek",):
         row = CT.provider("deepseek")
         io.say("  整理是原委用一个大模型把你的对话归到各条主线上。这一套用 %s %s〔%s〕：%s" % (row["name"], row["model"], row["label"], row["note"]))
+        io.say("  （不想整理：这里选 n，再在列表里选最后一项「不整理」。）")
         if not yes(io.ask("用这个吗？ [Y/n]："), True):
             row = _choose_provider(io, preset)
     else:
         row = _choose_provider(io, preset)
+    if row is _OFF:
+        return _interactive_without_organize(io, sys_, home, hermes_cmd, args, preset)
     url, model = row["base_url"], row["model"]
     if row["id"] in ("manual", "local") or not url:
         url = io.ask("地址（兼容 OpenAI 的接口，到 /v1 为止）[%s]：" % (row["base_url"] or ""), row["base_url"] or "")
@@ -873,7 +904,7 @@ def interactive(args, io, sys_, home, hermes_cmd):
     sc = _pick(io, "选 [1]：", 3, 1)
     args.read_scope = {1: None, 2: "isolated", 3: "all_open"}[sc]
     _owner_questions(args, io, sys_, home)
-    return {"host": "hermes", "preset": preset, "provider": prov, "vectors": vec, "key": key}
+    return {"host": "hermes", "preset": preset, "provider": prov, "vectors": vec, "key": key, "organize": True}
 
 
 def _pick(io, prompt, n, default):
@@ -889,7 +920,30 @@ def _choose_provider(io, preset):
     io.say("  整理是原委用一个大模型把你的对话归到各条主线上。现在支持这些（都兼容 OpenAI 的接口）：")
     for i, r in enumerate(rows, 1):
         io.say("    %d) %s　%s〔%s〕%s" % (i, r["name"], r["model"] or "（模型名你自己填）", r["label"], "　" + r["note"] if r["label"] != CT.UNTESTED else "　" + CT.UNTESTED_NOTE))
-    return rows[_pick(io, "选 [1]：", len(rows), 1) - 1]
+    io.say("    %d) 不整理　不用密钥、不花钱；原话照常存、照常查，只是没有主线可用。以后随时可以 yuanwei organize on 再打开，关着时存下的对话会按顺序补整理" % (len(rows) + 1))
+    n = _pick(io, "选 [1]：", len(rows) + 1, 1)
+    return _OFF if n == len(rows) + 1 else rows[n - 1]
+
+
+_OFF = {"id": "__organize_off__"}                                                       # 向导里「不整理」这一项（不是供应商）
+
+
+def _interactive_without_organize(io, sys_, home, hermes_cmd, args, preset):
+    """选了「不整理」：整理用的模型、密钥两步跳过；供应商设置仍写进配置（默认的 DeepSeek，以后 yuanwei organize on 就能用；要换别家：重新运行向导选「整理」）。接着问向量和读取范围。"""
+    io.say("  不整理：整理用的模型、整理用的密钥这两步跳过，不需要密钥。")
+    prov = _provider_from_row(CT.provider("deepseek"))
+    vec = {"mode": "none", "download": False, "allow_remote": False, "install_numpy": False}
+    io.say("\n第 6 步　向量")
+    if preset["vectors"] == "none":
+        io.say("  这一套不开向量（只用关键词）。以后随时可以 yuanwei vectors setup。")
+    else:
+        vec = _vector_questions(io, sys_, home, hermes_cmd, args, preset)
+    io.say("\n第 7 步　读取范围、哪个账号是你")
+    io.say("  能翻哪些工作区？\n    1) 乙（默认）：在「生活」里能翻生活和所有项目；在项目里只翻这个项目。\n    2) 甲：每个工作区只翻自己。\n    3) 丙：全部互通。")
+    sc = _pick(io, "选 [1]：", 3, 1)
+    args.read_scope = {1: None, 2: "isolated", 3: "all_open"}[sc]
+    _owner_questions(args, io, sys_, home)
+    return {"host": "hermes", "preset": preset, "provider": prov, "vectors": vec, "key": {"choice": "env_or_file", "value": None, "test": False}, "organize": False}
 
 
 def _enter_key(io, key):
@@ -1119,7 +1173,8 @@ def vectors_setup(a, io, sys_, home, inst, cfg):
             vec = _vector_questions(io, sys_, home, None, args2, None)
         else:
             _refuse("missing_vectors", "不在终端里：请用 --vectors ollama|lmstudio|custom 说明要用哪个（只想看计划就不加 --yes）")
-        ch = {"host": "hermes", "preset": {"id": "vectors", "name": "向量", "label": ""}, "provider": prov, "vectors": vec, "key": {"choice": "env_or_file", "value": None, "test": False}}
+        ch = {"host": "hermes", "preset": {"id": "vectors", "name": "向量", "label": ""}, "provider": prov, "vectors": vec, "key": {"choice": "env_or_file", "value": None, "test": False},
+              "organize": cfg.organize}                                      # 改向量会重写 yuanwei.toml：整理开关照原样带过去，不能因为换了向量就把关掉的整理又打开
         cmds = {k: v for k, v in (("ollama", a.ollama_cmd), ("lmstudio", a.lms_cmd)) if v}
         vp = vector_plan(sys_, ch, home, cmds, None, a.hermes_python)
         lines = []

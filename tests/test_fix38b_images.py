@@ -62,7 +62,7 @@ def test_attachment_route_typed_text_memory_and_row_with_hints(tmp_path, text, c
     assert flatten(row) != text                                      # 行里多了提示，记忆那头没有：真机上就是这样对不上的
     mem, a = mk(tmp_path / "mem")
     rows = run(a, mem, text, row)
-    assert rows == [("hs1", "user", text + "\n〔带 %d 张图〕" % count), ("hs1", "assistant", "图片回复")]
+    assert rows == [("hs1", "user", text + "\n（带 %d 张图）" % count), ("hs1", "assistant", "图片回复")]
     assert "synthetic-image" not in str(rows)
     assert a.recorded_turns == 1
     a.shutdown()
@@ -72,7 +72,7 @@ def test_attachment_route_keeps_typed_text_exactly_including_edge_whitespace(tmp
     typed = "  原字\n保留  "
     row = native_content(tmp_path, typed, 1)                         # 宿主构造函数会把字两头的空白去掉；记忆那头没去
     mem, a = mk(tmp_path / "mem")
-    assert run(a, mem, typed, row)[0][2] == typed + "\n〔带 1 张图〕"
+    assert run(a, mem, typed, row)[0][2] == typed + "\n（带 1 张图）"
     a.shutdown()
 
 
@@ -84,7 +84,7 @@ def test_api_route_both_ends_carry_hints_which_are_not_stored(tmp_path, monkeypa
     assert sync_text.startswith(text + "\n\n[Image attached at: ") and sync_text.count("[Image attached at: ") == count
     mem, a = mk(tmp_path / "mem")
     rows = run(a, mem, sync_text, row)
-    assert rows == [("hs1", "user", text + "\n〔带 %d 张图〕" % count), ("hs1", "assistant", "图片回复")]
+    assert rows == [("hs1", "user", text + "\n（带 %d 张图）" % count), ("hs1", "assistant", "图片回复")]
     assert "/synthetic/" not in str(rows)
     a.shutdown()
 
@@ -94,7 +94,7 @@ def test_api_route_image_only_keeps_the_indistinguishable_default_ask(tmp_path, 
     mem, a = mk(tmp_path / "mem")
     rows = run(a, mem, flatten(row), row)
     # 记忆和行里都没有「是用户写的还是宿主补的」的区别（和附件路由纯图同一个限制，见 0.1.0a5 文档）：保留这句，路径不存。
-    assert rows[0] == ("hs1", "user", DEFAULT_ASK + "\n〔带 1 张图〕")
+    assert rows[0] == ("hs1", "user", DEFAULT_ASK + "\n（带 1 张图）")
     assert "/synthetic/" not in str(rows)
     a.shutdown()
 

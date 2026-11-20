@@ -158,7 +158,7 @@ class NoteMeter:
 
 class NoteFitter:
     """给 pack_reference 当 selector：按给定次序一条条装，估算词元和字符数两样都不超过这一段的上限；
-    整条放不下：stop＝到此为止；skip＝跳过这一条接着往后装。原话里有编码用的替代字符的消息装不了（记在 conflicts 里，不当成「放不下」）。"""
+    整条放不下：stop＝到此为止；skip＝跳过这一条接着往后装。原话里本来就有编码用的替代字符的消息照常装（0.1.0a7 起；conflicts 恒为空，只为旧调用保留这个键）。"""
 
     def __init__(self, caps, oversize, mp, rule_in_note, ruler=1):
         self.caps, self.oversize, self.mp, self.rule_in_note, self.ruler = caps, oversize, mp, rule_in_note, ruler
@@ -174,10 +174,6 @@ class NoteFitter:
             if m in seen:
                 continue
             seen.add(m)
-            if any(ch in mp.rep_to_orig for ch in rows_by_id[m]["content"]):
-                if m not in self.conflicts:
-                    self.conflicts.append(m)
-                continue
             t, c = meter.totals(chosen + [m])
             if t <= tok_cap and c <= char_cap:
                 chosen.append(m)

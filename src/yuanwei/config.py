@@ -17,6 +17,7 @@ MAX_PROVIDER_PARAMS = {"model": "deepseek-flash", "temperature": 0, "reasoning_e
 @dataclasses.dataclass
 class Config:
     # ---- 整理（写入）
+    organize: bool = True                     # 整理开关（0.1.0a7 起，按机器人存）：True＝照旧整理（默认）；False＝不整理：原话、切句、索引、向量、封步照常，但不拉起整理、不发请求、不要密钥，查回来不挂「未整理」；再打开时按封步顺序补。不进 write_snapshot（不影响整理输入的指纹）
     write_prompt: str = "B0"                  # B0（默认）或 A：切换只影响以后封的步
     allow_summary_edit: bool = True
     strict_grouping: bool = False
@@ -66,6 +67,8 @@ class Config:
     answer_timezone: str = "Asia/Bangkok"
 
     def validate(self):
+        if not isinstance(self.organize, bool):
+            raise ConfigError("organize 只能是 true 或 false，实际 %r" % (self.organize,))
         if self.write_prompt not in PROMPT_VERSIONS:
             raise ConfigError("write_prompt 只能是 %s，实际 %r" % (PROMPT_VERSIONS, self.write_prompt))
         if not isinstance(self.recall_ranked_pages, bool):

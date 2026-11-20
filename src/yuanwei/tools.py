@@ -46,8 +46,9 @@ def _err(reason, message):
 
 
 class ToolSurface:
-    def __init__(self, mem, access, profile, identity_source):
+    def __init__(self, mem, access, profile, identity_source, home=None):
         self.mem, self.acc, self.profile, self.ids = mem, access, profile, identity_source
+        self.home = home                                               # Hermes 家目录：没归类的内部错误按它累计（internal_errors.py）；没有（比如 MCP 单机）就不累计
         self._bind_lock = threading.Lock()                             # 查调用登记表用身份源自己的只读连接（不和工具调用里的读取共用连接），这把锁只管那一条连接
         self._lock = threading.Lock()                                  # 一个 MCP 服务一次只处理一个工具调用：共用一条 SQLite 连接，不让两个调用的事务交错
 
@@ -138,6 +139,8 @@ class ToolSurface:
             return _err("provider", "向量服务出错。")
         if isinstance(e, (StoreError, YuanweiError)):
             return _err(getattr(e, "code", "store_error"), type(e).__name__)
+        from . import internal_errors as IE
+        IE.record(self.home, e)                                                                 # 真机上只回类名查不了：按 Hermes 家目录累计「类名、抛出的文件和行号、次数、最近 30 次的时间」；不存异常的消息文字（可能带着原话）
         return _err("internal_error", type(e).__name__)
 
     # ---------------------------------------------------------------- 收尾：登记组装、返回前再核、按宿主核大小
@@ -292,5 +295,8 @@ class ToolSurface:
                "failed_steps": st["failed_steps"], "abandoned_steps": st["abandoned_steps"], "skipped_steps": st["skipped_steps"], "done_steps": st["done_steps"],
                "long_unorganized": st["long_unorganized"], "paused": bool(st["paused"]), "paused_reason": (st["paused"] or {}).get("reason") if st["paused"] else None,
                "retrieval": st["retrieval"], "write": st["write"], "cost": st["cost"], "cost_today": st["cost_today"], "cut": st["cut"], "operational": st["operational"]}
+        if not st["organize"]["on"]:                                                           # 整理关着：不给积压、超长未整理这类数，改说「整理已关」（开着时这一项不出现，输出和以前一样）
+            del out["backlog"], out["long_unorganized"]
+            out["organize"] = {"text": "整理已关", "sealed_steps_waiting": st["organize"]["sealed_steps_waiting"], "waiting_text": st["organize"]["waiting_text"]}
         text = "〔yuanwei｜状态〕（backlog、failed_steps、paused 等队列和暂停的数字是当前的运营状态，不是某个旧截点的状态）\n" + json.dumps(out, ensure_ascii=False, sort_keys=True)
         return self._finish(tk, text, [], {"status": out})

@@ -313,7 +313,7 @@ class HermesAdapter:
         self.acc = Access(self.mem)
         self.ids = InProcessIdentity()
         prof = H.profile(HOST)
-        self._surfaces = {ws["key"]: ToolSurface(self.mem, self.acc, prof, self.ids)}
+        self._surfaces = {ws["key"]: ToolSurface(self.mem, self.acc, prof, self.ids, home=self._home)}
         self.runner = ModeRunner(self.mem, self.acc, self._runner_profile(prof), ModeConfig(mode=self.cfg.get("mode", "tools_only")))
         self.ids.set(HOST, self.session, "", None)
         dflt = self.cfg.get("window_default", "on")
@@ -345,7 +345,7 @@ class HermesAdapter:
         m = self._open(key)
         from .cross_recall import SourceAccess
         borrowed = SourceAccess(m, self.acc, mirror_owner=True)      # 来源日志+owner活动计数；仍核来源禁读和删除版本
-        sf = ToolSurface(m, borrowed, H.profile(HOST), self.ids)
+        sf = ToolSurface(m, borrowed, H.profile(HOST), self.ids, home=self._home)
         self._surfaces[key] = sf
         return sf
 
@@ -900,7 +900,7 @@ class HermesAdapter:
         if image:
             # 原文字逐字符保留；图片仅留数量，给后续多模态接入一个明确的文本占位。
             caption = image[3]
-            user_content = (caption + "\n" if caption else "") + "〔带 %d 张图〕" % image[1]
+            user_content = (caption + "\n" if caption else "") + "（带 %d 张图）" % image[1]
         try:
             r = self.mem.record(HOST, sid, uid, "user", user_content, time=t, turn_id=ent["token"], capture=ent.get("capture"))            # 绑定这一轮：之后这一轮的读取把它排除，不当历史交回来
             if r.get("blocked"):                                                             # 被删除屏障挡住（确认删除那一轮、删除前开始的迟到写入）：不记
@@ -1038,11 +1038,15 @@ class HermesAdapter:
         try:
             from . import keystore as KS
             cp = self.cfg.get("config_path")
-            p = (Config.load(cp).provider if cp else Config().provider) or {}
+            c = Config.load(cp) if cp else Config()
+            p = c.provider or {}
             env = p.get("api_key_env")
             if not env:
                 return {"env": None, "source": "not_needed"}
-            return {"env": env, "source": KS.source(env, p.get("key_file"))}
+            out = {"env": env, "source": KS.source(env, p.get("key_file"))}
+            if not c.organize:
+                out["needed"] = False                                                                # 整理关着：不需要整理密钥（开着时这一项不出现，和以前一样）
+            return out
         except Exception as e:                                                                   # noqa: BLE001
             return {"env": None, "source": "unknown", "error": type(e).__name__}
 

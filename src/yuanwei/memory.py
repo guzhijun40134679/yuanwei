@@ -220,7 +220,8 @@ class Memory:
         else:
             raise last
         return {"raw_saved": True, "pending": False, "readable": True, "duplicate": dup, "msg_id": row["msg_id"], "seq": row["seq"], "status": self._msg_status(row), "is_long": bool(row["is_long"]),
-                "readable_note": "已入库，可立即按关键词和编号读（向量算好后也按向量）；recall／便条只排当前这一轮，结果里标出未整理的",
+                "readable_note": ("已入库，可立即按关键词和编号读（向量算好后也按向量）；recall／便条只排当前这一轮，结果里标出未整理的" if self.cfg.organize
+                                  else "已入库，可立即按关键词和编号读（向量算好后也按向量）；recall／便条只排当前这一轮；整理已关"),
                 "fingerprint": row["fingerprint"], "redacted": row.get("redacted", 0)}
 
     def _place(self, args, flush_errors):
@@ -617,6 +618,20 @@ class Memory:
         with self._run_lock() as got:
             return not got
 
+    def _organize_still_on(self):
+        """整理现在还开着没有：这个实例读到的设置开着，而且（有配置文件的话）文件里现在也没被改成关。文件读不出来按开着（实例读到的就是开着）。
+        整理进程是长跑的，用户中途 `yuanwei organize off` 改的是文件，所以每步之前重读一次文件。"""
+        if not self.cfg.organize:
+            return False
+        if not self.config_path:
+            return True
+        try:
+            import tomllib
+            with open(self.config_path, "rb") as f:
+                return tomllib.load(f).get("organize", True) is not False
+        except (OSError, ValueError):
+            return True
+
     @staticmethod
     def backoff_seconds(failures):
         """同一步已经连续失败 failures 次之后，下一次重试前要等多久：1 分钟、5 分钟、30 分钟，之后每次 2 小时。"""
@@ -831,6 +846,9 @@ class Memory:
         """把积压的步整理掉（持锁；同一工作区按封步顺序一步一步做）。返回 {"status", "done", "abandoned", "skipped", "stopped_at", "reason"}。
         status：idle（没有活）／done（做完积压）／paused／busy（别人在整理）／stopped（出错停下）。"""
         out = {"status": "idle", "done": 0, "abandoned": 0, "skipped": 0, "stopped_at": None, "reason": None}
+        if not self.cfg.organize:                                                # 整理关着：什么都不做（不拿锁、不封步、不发请求）
+            out.update(status="organize_off", reason="organize_off")
+            return out
         with self._run_lock() as got:
             if not got:
                 out["status"] = "busy"
@@ -839,6 +857,9 @@ class Memory:
             self._flush_cost_pending()
             n = 0
             for step in self.pending_steps():
+                if not self._organize_still_on():                  # 整理进程跑到一半用户把整理关了：正在做的那一步已经做完（只在两步之间看），从下一步起不再做
+                    out.update(status="organize_off", reason="organize_off")
+                    return out
                 p = self.pause_state()
                 if p:
                     out.update(status="paused", reason=p["reason"])
@@ -981,6 +1002,8 @@ class Memory:
     def check_and_spawn(self):
         """检查有没有该封的步、该整理的步；有、没有暂停、没有人在整理，就拉起整理。只由允许的入口调用（status／导出／安装／卸载不调）。返回 {"action","reason"}。"""
         self.maintain()
+        if not self.cfg.organize:                            # 整理关着：封步照常（上一行），但不拉起整理、不发请求、不花钱；关着时封好的步留着，打开以后按封步顺序补
+            return {"action": "none", "reason": "organize_off"}
         if not self.pending_steps():
             return {"action": "none", "reason": "没有积压"}
         p = self.pause_state()
@@ -1211,7 +1234,7 @@ class Memory:
         dv0 = self.store.del_ver(self.ns)
         self.check_and_spawn()
         r = self._read_view(host, session_id, branch, turn_id).recall(query, budget=budget, cursor=cursor, cut=cut, limit_chars=limit_chars)
-        r["backlog"] = self.backlog()
+        r["backlog"] = self.backlog() if self.cfg.organize else None                  # 整理关着：不报积压
         self._check_ver(dv0)
         return r
 
@@ -1267,7 +1290,7 @@ class Memory:
         self._check_ver(dv0)
         r["gates"]["free"] = free
         r["gates"]["permission"] = {"allowed": True}
-        r["backlog"] = self.backlog()
+        r["backlog"] = self.backlog() if self.cfg.organize else None                  # 整理关着：不报积压
         return r
 
     def answer_request(self, question, asked_at, as_of=None, tz_label=None):
@@ -1315,11 +1338,12 @@ class Memory:
             by[s["status"]] = by.get(s["status"], 0) + 1
         ws = self.store.workspace(self.ns)
         cost = self.store.cost_sum(self.ns)
-        return {"workspace": self.ns, "cut": self.cut(), "backlog": self.backlog(), "pending_writes": self.pending_count(), "pending_review": self.pending_review_count(), "flush_errors": list(getattr(self, "last_flush_errors", [])), "failed_steps": by.get("failed", 0),
+        return {"workspace": self.ns, "cut": self.cut(), "backlog": self.backlog() if self.cfg.organize else None, "organize": self._organize_status(), "pending_writes": self.pending_count(), "pending_review": self.pending_review_count(), "flush_errors": list(getattr(self, "last_flush_errors", [])), "failed_steps": by.get("failed", 0),
                 "abandoned_steps": by.get("abandoned", 0), "skipped_steps": by.get("skipped", 0), "done_steps": by.get("done", 0),
                 "long_unorganized": self.store.count_messages(self.ns, "is_long=1"), "paused": self.pause_state(),
                 "retrieval": {"mode": self.cfg.retrieval, "index_version": self.index_version, "vector_identity": self.vector_fp,
-                              "raw_visibility": "已入库原话可立即按关键词和编号读（向量算好后也按向量）；recall／便条只排当前这一轮，结果里标出未整理的",
+                              "raw_visibility": ("已入库原话可立即按关键词和编号读（向量算好后也按向量）；recall／便条只排当前这一轮，结果里标出未整理的" if self.cfg.organize
+                                                 else "已入库原话可立即按关键词和编号读（向量算好后也按向量）；recall／便条只排当前这一轮；整理已关"),
                               "vectors": self.store.vector_count(self.vector_fp) if self.vector_fp else 0, "first_budget": self.cfg.first_budget,
                               "recall_budget": self.cfg.recall_budget, "total_budget": self.cfg.total_budget, "pool_cap": self.cfg.pool_cap, "neighbors": self.cfg.neighbors,
                               "relevance": self._relevance_status(), "query_timeout": VX.query_timeout_status(self.cfg.embedding)},
@@ -1327,7 +1351,16 @@ class Memory:
                 "cost": cost, "cost_today": self.cost_today(), "read_permission": self.read_permission(), "lock_held": self.lock_held(),
                 "redaction": self._redaction_status(ws), "deletion": self._deletion_status(),
                 "organizer": self._organizer_status(), "vectors": self._vectors_status(), "spawn_log_tail": self.spawn_log_tail(),
-                "operational": {"scope": "current", "note": "backlog、pending_*、failed_steps、abandoned_steps、skipped_steps、done_steps、paused、lock_held 是读取这一刻的当前运营状态，不是 cut 这个截点上的状态"}}
+                "operational": {"scope": "current", "note": ("backlog、pending_*、failed_steps、abandoned_steps、skipped_steps、done_steps、paused、lock_held 是读取这一刻的当前运营状态，不是 cut 这个截点上的状态" if self.cfg.organize
+                                                              else "pending_*、failed_steps、abandoned_steps、skipped_steps、done_steps、paused、lock_held 是读取这一刻的当前运营状态，不是 cut 这个截点上的状态")}}
+
+    def _organize_status(self):
+        """整理开关的状态。关着：「整理：关」，加上关着时封好、还没整理的步数（打开以后按封步顺序补）；开着：只说开。"""
+        if self.cfg.organize:
+            return {"on": True, "text": "整理：开"}
+        waiting = len(self.pending_steps())
+        return {"on": False, "text": "整理：关", "sealed_steps_waiting": waiting,
+                "waiting_text": "关着时封好的 %d 步，打开后按封步顺序补" % waiting}
 
     def _relevance_status(self):
         from . import relevance_diagnostics as RDG
@@ -1340,11 +1373,15 @@ class Memory:
         params = p.get("params") or {}
         pr = self._pricing()
         row = CT.provider(p.get("id")) if p.get("id") else None
-        return {"id": p.get("id"), "label": p.get("label") or (row["label"] if row else None), "model": params.get("model"),
+        d = {"id": p.get("id"), "label": p.get("label") or (row["label"] if row else None), "model": params.get("model"),
                 "key": {"env": p.get("api_key_env"), "source": KS.source(p.get("api_key_env"), p.get("key_file")) if p.get("api_key_env") else "not_needed"},
                 "cost": {"currency": pr["currency"] if pr else None, "price_table": pr is not None,
                          "budget_enforced": bool(pr and pr["currency"] == "CNY" and self.cfg.daily_cap_cny is not None),
                          "note": None if pr else "没有这个模型的价格表：只记用量，不估价；预算上限对它不起作用"}}
+        if not self.cfg.organize:                                    # 整理关着才加这两项（开着时这一段和以前一样）：整理已关、不需要整理密钥
+            d["enabled"] = False
+            d["key"]["needed"] = False
+        return d
 
     def _vectors_status(self):
         try:

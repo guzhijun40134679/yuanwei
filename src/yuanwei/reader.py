@@ -67,7 +67,7 @@ class Snapshot:
                 raise BadCut("截点的两个上界对不上：整理上界 %d 里的整理记录引用了 %d 条不在原话上界 %s 之内的原话" % (cut["org_seq"], len(gone), cut.get("raw_seq")))
         # 按本次截点的整理收据认；不能把“没有挂到主线”误当成“还没处理”。
         processed = {r["step_id"] for r in self.state["tables"]["receipts"] if r["kind"] == "step"}
-        unorganized = {r["msg_id"] for r in raw_rows if r.get("is_long") or r.get("step_id") not in processed}
+        unorganized = {r["msg_id"] for r in raw_rows if r.get("is_long") or r.get("step_id") not in processed} if reader.cfg.organize else set()        # 整理关着：不挂「未整理」（没有「还没整理」这回事）
         self.exclude = frozenset(exclude or ())
         self.excluded = self.exclude & raw_ids                          # 真的在这个截点里、被拿掉的
         self.rows = []
@@ -138,7 +138,7 @@ class Reader:
         ex = self.exclude if exclude is None else frozenset(exclude)
         v2 = CU.is_v2(cut)
         key = (CU.FORMAT if v2 else 1, cut["raw_seq"] if v2 else cut["vclock"], cut["org_seq"], cut["index_version"] if v2 else self.index_version, self.ns, self.index_version,
-               self.cfg.retrieval, self.vector_fp, self.store.vector_count(self.vector_fp) if self.vector_fp else 0, ex, self.store.del_ver(self.ns), self.blocked_reason())
+               self.cfg.retrieval, self.cfg.organize, self.vector_fp, self.store.vector_count(self.vector_fp) if self.vector_fp else 0, ex, self.store.del_ver(self.ns), self.blocked_reason())
         if key not in self._snaps:
             if len(self._snaps) > 4:
                 self._snaps.clear()
@@ -474,6 +474,8 @@ class Reader:
                 atts.append(d)
             out.append({"sentence_id": s["sentence_id"], "range": [s["start"], s["end"]], "text": s["text"], "role": s["role"], "attachments": atts})
         org = message_org_state(st, row)                      # 步的状态也按这个截点说，不读实时的 get_step
+        if not self.cfg.organize and org["state"] in ("no_receipt_in_cut", "long_not_organized"):
+            org = dict(org, text=OFF_TEXT)                    # 整理关着：没有整理结果就说「整理已关」，不说「尚无整理结果」
         step = {"step_id": org["step_id"], "state": org["state"]} if org["step_id"] else None       # 这一步在这个截点里已经有收据才算数；没有就不说它（封步本身不是截点里的事实）
         return {"message_id": message_id, "role": row["role"], "session_id": row["session_id"], "message_fingerprint": row["fingerprint"], "step": step,
                 "cut": snap.cut, "sentences": out, "organization": org, "note": None if org["state"] == "processed" else org["text"]}
@@ -500,6 +502,7 @@ def _mark(out, ch):
     return out
 
 
+OFF_TEXT = "整理已关，这条消息没有整理结果"
 ORG_TEXTS = {
     "no_receipt_in_cut": "本截点尚无整理结果（所属的步的收据还没进这个截点）",
     "processed": "已处理",

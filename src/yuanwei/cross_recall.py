@@ -112,7 +112,7 @@ def execute(adapter, args, keys):
         for _key, original in sorted(originals, key=lambda pair: pair[0]):
             stack.enter_context(original._lock)
         for key, original in originals:
-            surface = ToolSurface(original.mem, SourceAccess(original.mem, owner.acc), original.profile, original.ids)
+            surface = ToolSurface(original.mem, SourceAccess(original.mem, owner.acc), original.profile, original.ids, home=getattr(original, "home", None))
             ticket = surface.begin_ranked_read(identity)
             if isinstance(ticket, ToolResult):
                 return ticket

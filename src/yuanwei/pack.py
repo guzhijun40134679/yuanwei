@@ -145,15 +145,15 @@ class Meter:
 
 
 def conflict_chars(rows, mp):
+    """原话里本来就有的编码替代字符（只是报个情况，不再拒绝；0.1.0a7 起原话里有替代字符照编码、照交）。
+    研究时期把这种原话整条拒收，理由是「无法唯一还原」（要把编码后的文字反解回原话时，原来的替代字符和编码出来的分不开）；
+    产品里没有任何地方做还原（交出去的材料不反解），读回核对比的是「引用行＝编码后的原话」，原话里本来就有替代字符时 encode 不动它，核对照样成立。"""
     return sorted({c for r in rows for c in r["content"] if c in mp.rep_to_orig})
 
 
 def build_material(rows_sel, mp, opening=OPENING_PARTIAL):
-    """选中的消息（任意次序）→ 材料（编码后，不含边界行）。"""
+    """选中的消息（任意次序）→ 材料（编码后，不含边界行）。原话里本来就有替代字符的照常编码、照交（"conflict" 恒为空，只为旧调用保留这个键）。"""
     rows = sorted(rows_sel, key=lambda r: r["seq"])
-    bad = conflict_chars(rows, mp)
-    if bad:
-        return {"material": None, "conflict": bad, "rows": rows}
     lines, cur = [opening, "【原文】"], None
     for r in rows:
         key = (r["session_id"], r.get("date") or NONE_DATE)
@@ -201,10 +201,6 @@ def read_back(material, enc_content, opening=OPENING_PARTIAL):
 
 def select_ordered(cands, rows_by_id, mp, budget, ruler=1):
     """按给定次序一条条装，装不下就停。返回 {状态, 选中, 材料, tokens, 停在, 候选数}。额度按套首尾边界行以后的估算词元（ruler＝尺子版本）。"""
-    for m, _p, _f in cands:
-        bad = sorted({c for c in rows_by_id[m]["content"] if c in mp.rep_to_orig})
-        if bad:
-            return {"状态": "conflict", "选中": [], "材料": None, "tokens": None, "停在": m, "候选数": len(cands), "冲突字符": bad}
     meter = Meter(rows_by_id, mp, ruler=ruler)
     chosen, stop_at, flags = [], None, {}
     for m, _p, f in cands:
@@ -367,7 +363,7 @@ def pack_reference(hits, sidx, rows_by_id, mp, tmap, m2o, visible, searcher, que
         seq, segs = dedup_segments(parts)
         r = (selector or (lambda sq, rb, m, b: select_ordered(sq, rb, m, b, ruler)))(seq, rows_by_id, mp, budget)
         if r["状态"] != "ok":
-            raise PackError("原话里有编码用的替代字符，装不了：%s" % (r.get("冲突字符"),))
+            raise PackError("取材返回了不认识的状态：%r" % (r["状态"],))
         return dict(r, 装法=name, 额度=budget, 候选序=[c[0] for c in seq], 分段=segs, 来源序=[[c[0], c[1]] for c in seq])
     first_pack = run("第一遍", first_budget, [(SEG_THEME, th_part), (SEG_OTHER, other)])
     parents = dict(first_pack["来源序"])

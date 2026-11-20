@@ -653,11 +653,16 @@ def _status_extra(out, h, cpath, db, notes):
     row = CT.provider(p.get("id")) if p.get("id") else None
     env = p.get("api_key_env")
     ksrc = KS.source_with_dotenv(env, p.get("key_file"), h) if env else "not_needed"   # 先自己的文件、再全局文件、再环境变量；都没有再查 Hermes 的 .env 里有没有这个名字（只看名字，不读值；Hermes 运行时会自己读它，所以插件里看到的来源是 env）
-    if ksrc.startswith("file_unusable"):
+    if ksrc.startswith("file_unusable") and cfg.organize:                          # 整理关着：不需要整理密钥，密钥文件不能用不算问题
         notes.append(KS.UNUSABLE_NOTE)
+    from . import organize as OG
+    out["organize"] = {"on": cfg.organize, "text": OG.state_text(cfg.organize, OG.waiting_steps(db) if not cfg.organize else None)}      # 整理开关（yuanwei organize on|off）；关着时写明封好等着补的步数
     out["organizer"] = {"id": p.get("id"), "label": p.get("label") or (row["label"] if row else None), "model": model,
                         "key": {"env": env, "source": ksrc},
                         "cost": {"currency": pr["currency"] if pr else None, "price_table": pr is not None, "note": None if pr else "没有这个模型的价格表：只记用量，不估价；预算上限对它不起作用"}}
+    if not cfg.organize:                                                                  # 整理关着才加这两项（开着时这一段和以前一样）：整理已关、不需要整理密钥
+        out["organizer"]["enabled"] = False
+        out["organizer"]["key"]["needed"] = False
     if db and os.path.exists(db):
         st = Store.open_readonly(db)
         try:
@@ -765,6 +770,10 @@ def install_status(hermes_home, sys_=None, hermes_python=None):
     out["skip_reasons"] = SK.read(str(h))
     if out["skip_reasons"]["problem"]:
         notes.append("跳过原因的累计文件读不了（%s），不能当作没有跳过；原文件没有改动。" % out["skip_reasons"]["problem"])
+    from . import internal_errors as IE                                            # 工具里没归类的内部错误，按库累计（类名、抛出的文件和行号、次数、最近 30 次的时间；没有消息文字）
+    out["internal_errors"] = IE.read(str(h))
+    if out["internal_errors"]["problem"]:
+        notes.append("内部错误的累计文件读不了（%s），不能当作没有出过错；原文件没有改动。" % out["internal_errors"]["problem"])
     if sys_ is not None:
         try:
             from . import embedsetup as ES

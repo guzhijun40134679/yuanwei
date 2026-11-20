@@ -45,6 +45,7 @@ USER_HELP = """yuanwei：原委，给 AI 助手用的长期记忆（预览版）
   setup                 安装向导：一问一答，最后列出计划，你确认了才改东西（不问话的写法：setup --host hermes --preset recommended --yes）
   status hermes         看装得怎么样：装没装、读取范围、各工作区、整理用密钥从哪来、向量、Hermes 里有没有 NumPy、运行以来记了几轮、聊天平台本人登记及没记的条数
   owners set|list|delete [平台]     登记、查看、删除聊天平台的本人账号；set/delete 加 --yes 才改
+  organize on|off|status [hermes]   整理开关：off＝不整理（不发请求、不花钱、不需要整理密钥，原话照常存和查；关着时封好的步以后打开再补）；默认开着；on/off 加 --yes 才改
   key set|status|test|delete        整理用的密钥（输入时不显示；只放在你电脑上只有你能读的文件里）
   vectors setup|status|backfill|prune|serve|stop|remove-engine      本机向量（setup 开或换，status 看进度）
   conversations list|delete|status|resume [hermes]    管对话：看有哪些、删一段（加 --yes 才真的删）；不给 --db 就用 Hermes 接头的库，也可以写成 conversations list hermes
@@ -154,6 +155,7 @@ def _add_new_setup_args(sp):
     sp.add_argument("--lms-cmd", default=None)
     sp.add_argument("--pull-timeout", type=int, default=None, help="下载最长等多少秒（默认 1800）")
     sp.add_argument("--ignore-probe-failure", action="store_true", help="本机大模型的长输入探针没通过也照装（自己承担）")
+    sp.add_argument("--no-organize", action="store_true", help="不整理：不发请求、不花钱、不需要整理用的密钥；原话照常存和查。不给这一项＝沿用已有设置（第一次装就是整理开着）。以后 yuanwei organize on 再打开")
 
 
 def _catalog():
@@ -484,9 +486,12 @@ def _key_main(argv, io=None, sys_=None):
     inst = _installed(home)
     prov = {}
     has_config = False
+    organize_on = True                                                                  # 整理开关（yuanwei organize）；读不到配置就是默认的开
     try:
         if inst and inst.get("config_path") and os.path.exists(inst["config_path"]):
-            prov = dict(Config.load(inst["config_path"]).provider or {})
+            _c = Config.load(inst["config_path"])
+            prov = dict(_c.provider or {})
+            organize_on = _c.organize
             has_config = True
     except Exception:                                                                   # noqa: BLE001
         prov = {}
@@ -541,7 +546,11 @@ def _key_main(argv, io=None, sys_=None):
             rep["global_dir"] = os.path.dirname(global_path)
         if custom:
             rep["this_bot_only_manages"] = std_own
-        notes = [n for n in (basis_note, custom_note, KS.UNUSABLE_NOTE if src.startswith("file_unusable") else None) if n]
+        if not organize_on:
+            rep["organize"] = "off"
+            rep["organizer_key_needed"] = False
+        notes = [n for n in (basis_note, custom_note, KS.UNUSABLE_NOTE if (src.startswith("file_unusable") and organize_on) else None,
+                             "整理已关（yuanwei organize off）：不需要整理用的密钥，下面只是照实说密钥在哪。" if not organize_on else None) if n]
         if notes:
             rep["notes"] = notes
         _out(rep)
@@ -651,6 +660,24 @@ def _owners_main(argv):
         ap.error("list 不接受 --id")
     try:
         _out(OW.settings(a.hermes_home or _hermes_home_default(), action=a.action, platform=a.platform, ids=a.ids, apply=a.yes))
+        return 0
+    except HS.SetupRefused as e:
+        print(json.dumps({"error": e.code, "message": str(e)}, ensure_ascii=False), file=sys.stderr)
+        return 2
+
+
+def _organize_main(argv):
+    """yuanwei organize on|off|status [hermes]：整理开关。on/off 不带 --yes 只列计划。"""
+    from . import organize as OG
+    from . import hermes_setup as HS
+    ap = SafeParser(prog="yuanwei organize", allow_abbrev=False)
+    ap.add_argument("action", choices=list(OG.ACTIONS))
+    ap.add_argument("host", nargs="?", choices=["hermes"], default=None)
+    ap.add_argument("--hermes-home", default=None)
+    ap.add_argument("--yes", action="store_true", help="on/off 确认修改；不给只列计划")
+    a = ap.parse_args(argv)
+    try:
+        _out(OG.settings(a.hermes_home or _hermes_home_default(), action=a.action, apply=a.yes))
         return 0
     except HS.SetupRefused as e:
         print(json.dumps({"error": e.code, "message": str(e)}, ensure_ascii=False), file=sys.stderr)
@@ -818,6 +845,8 @@ def main(argv=None):
         return _key_main(raw[1:])
     if raw and raw[0] == "owners":
         return _owners_main(raw[1:])
+    if raw and raw[0] == "organize":
+        return _organize_main(raw[1:])
     if raw and raw[0] == "doctor":
         return _doctor_main(raw)
     if raw[:2] == ["status", "hermes"]:
