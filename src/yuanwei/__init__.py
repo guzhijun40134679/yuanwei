@@ -3,5 +3,5 @@ from .config import Config
 from .errors import *  # noqa: F401,F403
 from .memory import Memory
 
-__version__ = "0.1.0a7"
+__version__ = "0.1.0a10"
 __all__ = ["Memory", "Config", "__version__"]

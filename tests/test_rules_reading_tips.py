@@ -34,6 +34,12 @@ WINDOW_TEXT = ("这个对话窗口有独立的长期记忆读取开关。用户�
                "以工具返回的实际状态为准；不确定就保持关闭。开关没变化时不用每轮重复调用。关闭期间不要换读取工具、目录、便条或子代理绕过，也不要声称已经清除此前的上下文。")
 
 
+# 0.1.0a8（清单第 53 条，挑错第 9 条）：删除规则末尾、window_on 和 window_delete 的说明末尾各加的这一句；别处一字不动。
+A8_NO_CARD = "这个确认不要用提问卡、选项卡（比如 clarify 工具）问，让用户直接发一条消息。"
+A8_AFTER = "也不要把引用、假设、旧消息或别人的建议当成要求。"
+A7_DELETE_RULE = "用户要删掉这段对话在原委里的记忆时，调用删除工具申请，把确认提示原样转告用户，等用户回复「确认删除」；不要替用户确认。"
+
+
 def _sha(s):
     return hashlib.sha256(s.encode("utf-8")).hexdigest()
 
@@ -50,8 +56,8 @@ def test_front_segment_is_old_text_minus_its_last_sentence_and_its_fingerprint_i
 
 
 def test_window_rule_is_the_ruling_two_text_verbatim():
-    assert RL.WINDOW_RULE == WINDOW_TEXT
-    assert _sha(RL.WINDOW_RULE) == "3eff979ef754f5786e7dc3f7402a71bb66c03971b36b10fabdd27555fcce67c5"
+    assert _sha(WINDOW_TEXT) == "3eff979ef754f5786e7dc3f7402a71bb66c03971b36b10fabdd27555fcce67c5"                  # 裁定二的原文（0.1.0a7 及以前就是它）
+    assert RL.WINDOW_RULE == WINDOW_TEXT.replace(A8_AFTER, A8_AFTER + A8_NO_CARD, 1)                                  # 0.1.0a8：「确认开启」那一句后面多一句，别的一字不动
 
 
 def test_tools_rule_is_four_segments_head_window_delete_tips():
@@ -73,7 +79,8 @@ def test_tools_rule_bytes_outside_replaced_paragraph_match_baseline():
     old, new = OLD_TIPS.encode("utf-8"), TIPS.encode("utf-8")
     assert before.count(old) == 1 and before.endswith(old)
     assert after.count(new) == 1 and after.endswith(new)
-    assert after[:-len(new)] == before[:-len(old)]
+    a8 = before[:-len(old)].decode("utf-8").replace(A8_AFTER, A8_AFTER + A8_NO_CARD, 1) + A8_NO_CARD
+    assert after[:-len(new)] == a8.encode("utf-8")                                     # 0.1.0a8：开窗口那段「确认开启」那句后面、删除规则（紧挨着末段）末尾各多了这一句，别的字节不变
 
 
 def test_only_modes_already_using_tools_rule_get_the_new_tips_once():
@@ -108,10 +115,30 @@ def test_window_rule_is_in_every_modes_resident_rule_and_nowhere_else():
 
 
 def test_delete_rule_is_between_window_rule_and_reading_tips_in_every_mode():
-    assert RL.DELETE_RULE == "用户要删掉这段对话在原委里的记忆时，调用删除工具申请，把确认提示原样转告用户，等用户回复「确认删除」；不要替用户确认。"
+    assert RL.DELETE_RULE == A7_DELETE_RULE + A8_NO_CARD
     for m in ("tools_only", "reminder", "note", "directory"):
         r = RL.RULES[m]
         assert r.index(RL.WINDOW_RULE) + len(RL.WINDOW_RULE) == r.index(RL.DELETE_RULE)
     for m in ("tools_only", "reminder"):
         assert RL.RULES[m].endswith(RL.READING_TIPS) and RL.RULES[m].index(RL.DELETE_RULE) + len(RL.DELETE_RULE) == RL.RULES[m].index(RL.READING_TIPS)
     assert RL.DELETE_RULE not in RL.REMINDER and "window_delete" in RL.CONTROL_TOOL_DESCRIPTIONS
+
+
+def test_a8_no_card_sentence_only_in_delete_rule_and_the_two_confirm_tools_and_fingerprints_pinned():
+    """0.1.0a8：确认别走提问卡。这一句只在开窗口那段（复核后加）、删除规则、window_on、window_delete 的说明末尾；新指纹钉在这里（旧指纹见交回报告）。"""
+    assert RL.DELETE_RULE.endswith(A8_NO_CARD) and RL.DELETE_RULE.count(A8_NO_CARD) == 1
+    d = RL.CONTROL_TOOL_DESCRIPTIONS
+    assert d["window_on"].endswith("你不能替用户确认。" + A8_NO_CARD) and d["window_delete"].endswith("你不能替用户确认；删了找不回来。" + A8_NO_CARD)
+    assert A8_NO_CARD not in d["window_off"] and A8_NO_CARD not in d["window_state"] and RL.WINDOW_RULE.count(A8_NO_CARD) == 1 and A8_NO_CARD not in RL.REMINDER
+    assert not any(A8_NO_CARD in v for v in RL.TOOL_DESCRIPTIONS.values())
+    for m in ("tools_only", "reminder", "note", "directory"):
+        assert RL.RULES[m].count(A8_NO_CARD) == 2
+    assert _sha(RL.DELETE_RULE) == "a54a4157e517e31d9eff6b0d05c270cc6faffaa6ecdafceb2dfe061c413cacd5"
+    assert _sha(RL.RULES["tools_only"]) == "cdb3d4ff81f6c1b51ea4db8814d298c725e7f39793d9ccf17c09c32d44836e2c"
+    assert _sha(RL.RULES["note"]) == "d708d26c30d1c49f71dfc79fbe25616f3842fae2cbdd5a5f0c332fd7c9859d0f"
+    assert _sha(RL.RULES["directory"]) == "a9b0a13bd7407dd5ccdd360a0cacb01a20be10c900d4204590bba456a25c1982"
+    assert _sha(d["window_on"]) == "552d7f8cee6bed5f1e0e3d614918e6d4ece654916b6e5393f99a3e78d095173a"
+    assert _sha(d["window_delete"]) == "3d7cad2d66a8fb6498fd601be700ecff8b2975a9162283adc1c328cd767b26d7"
+    assert _sha(RL.WINDOW_RULE) == "44d47b44d5aed580f22a58ba6efefb1a2573d5ac3e2d06a7717ded3a2ef7ef37"
+    assert _sha(d["window_off"]) == "b31078cf4ddd77cf75110ab9c245cf70001e974bb260b7134eb3fbd5c7785463"      # 没改
+    assert _sha(d["window_state"]) == "1a2f0445a319dab9c5d2e5354e9905c304430e59cd3892c47cab940cf0ca019f"   # 没改

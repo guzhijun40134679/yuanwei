@@ -179,11 +179,17 @@ def test_missing_messages_or_missing_user_row_cannot_confirm_so_nothing_is_recor
 
 
 def test_steer_or_later_machinery_user_row_after_the_turn_input_also_keeps_it_out(tmp_path):
+    """0.1.0a9（清单第 55 条）改了：display_kind 是 steer 的行不再让整轮丢——外壳对得上的插话折进开头那一条，外壳对不上的不存、记 steer_dropped:unknown_shape，这一轮照常记；
+    别的机器行（process_complete 这类）照旧整轮不记。"""
     mem, a = mk(tmp_path)
     turn(a, 1, "一句话")
     m = msgs("一句话") + [{"role": "user", "content": "[OUT-OF-BAND USER MESSAGE", "display_kind": "steer"}]
     a.sync_turn("一句话", "回答", session_id="hs1", messages=m)
-    assert stored(mem) == []
+    assert [x[1:] for x in stored(mem)] == [("user", "一句话"), ("assistant", "回答")] and a.status()["skipped"] == {}
+    mem2, b = mk(tmp_path / "other")
+    turn(b, 1, "一句话")
+    b.sync_turn("一句话", "回答", session_id="hs1", messages=msgs("一句话") + [{"role": "user", "content": "后台完成", "display_kind": "process_complete"}])
+    assert stored(mem2) == [] and b.status()["skipped"] == {"machinery_row": 1}
 
 
 def test_old_host_without_author_fields_is_admitted_and_labelled(tmp_path):

@@ -8,7 +8,9 @@ import textwrap
 
 import pytest
 
+from hermes_clarify_contract import DOCTOR_SOURCES as CLARIFY_SOURCES
 from hermes_image_contract import DOCTOR_SOURCES as IMAGE_SOURCES
+from hermes_midturn_contract import DOCTOR_FILES as MIDTURN_FILES
 from yuanwei import cli
 from yuanwei import hermes_compat as HC
 
@@ -201,7 +203,7 @@ FILES = {"pm/plugin_declarations.py": PM_DECLARATIONS, "pm/plugins_state.py": PM
          "agent/context_compressor.py": COMPRESSOR, "plugins/plugin_loader.py": LOADER, "plugins/memory/__init__.py": MEMORY_PLUGINS,
          "hermes_cli/memory_setup.py": MEMORY_SETUP, "hermes_cli/config_defaults.py": DEFAULTS, "tools/hook_output_spill.py": HOOK_SPILL, "hermes_cli/config.py": HERMES_CONFIG}
 
-for _rel, _source in IMAGE_SOURCES.items():
+for _rel, _source in list(IMAGE_SOURCES.items()) + list(CLARIFY_SOURCES.items()) + list(MIDTURN_FILES.items()):
     FILES[_rel] = FILES.get(_rel, "") + "\n" + _source
 
 
@@ -360,6 +362,11 @@ def test_pinned_revisions_read_through_git_match_the_compat_table(rev, changed):
     r = HC.doctor_from_reader(git_reader(rev))
     st = status(r)
     image_checks = {k: st.pop(k) for k in ("memory_query_text", "memory_sync_text")}
+    clarify = (st.pop("clarify_result"), st.pop("clarify_turn_markers"))                   # 0.1.0a8：935c 没有后三个函数、也没有自动加载技能的开头；v0.22.0 的 _result 没有 shown 换回，格式相同，算 ok（复核第 14 条）
+    assert clarify == (("missing", "missing") if rev.startswith("935c1e89") else ("ok", "ok")), (rev, clarify)
+    midturn = (st.pop("midturn_redirect"), st.pop("midturn_steer"), st.pop("midturn_envelope"))      # 0.1.0a9（清单第 55 条）：935c 没有这三处的文件；v0.22.0 的 _set_steer_parts 还不是换行连接、来源说明里还没有 from_bot；v0.23.0 起只差 from_bot；v0.23.2 全对
+    assert midturn == {"935c1e8962d43de3ef0adde30e80dda55d0247db": ("missing", "missing", "missing"), "0e427d788d": ("ok", "changed", "changed"),
+                       "2bd378ed1b": ("ok", "ok", "changed"), "ae2a81ccc0": ("ok", "ok", "ok")}[rev], (rev, midturn)
     assert "missing" not in st.values(), (rev, st)
     assert {k for k, v in st.items() if v != "ok"} == changed, (rev, st)
     # 新检查明确报告没核：v0.20 缺两套函数，v0.22 缺 native API 尾注构造函数。
@@ -524,3 +531,45 @@ def test_window_switch_kwargs_check_flips_when_on_session_switch_loses_a_field(t
     r = HC.doctor(host(tmp_path, **{"agent/memory_provider.py": (line, line.replace(old, new, 1))}))
     assert status(r)["window_switch_kwargs"] == "changed"
     assert "window" in [c for c in r["checks"] if c["id"] == "window_switch_kwargs"][0]["affects"]
+
+
+# ------------------------------------------------------------------ 0.1.0a9（清单第 55 条）：改口、插话、来源说明三项（合成宿主 = 逐字冻结的源码片段）
+@pytest.mark.parametrize("edit,check,word", [
+    ({"agent/conversation_loop.py": ('_INTERRUPT_SCAFFOLD_MARKER = "[This response was interrupted by a user correction.]"', '_INTERRUPT_SCAFFOLD_MARKER = "[Interrupted.]"')}, "midturn_redirect", "_INTERRUPT_SCAFFOLD_MARKER"),
+    ({"agent/conversation_loop.py": ('"api_content": correction}', '"api_content": correction, "display_kind": "redirect"}')}, "midturn_redirect", "display_kind"),
+    ({"agent/conversation_loop.py": ('{"role": "user", "content": text, "api_content": correction}', '{"role": "user", "content": text}')}, "midturn_redirect", "api_content"),
+    ({"agent/conversation_loop.py": ('f"[Context from the interrupted assistant response]\\n{checkpoint}\\n\\n{text}"', 'f"[Context]\\n{checkpoint}\\n\\n{text}"')}, "midturn_redirect", "api_content"),
+    ({"agent/turn_iteration_prep.py": ("User correction during the turn: ", "Correction: ")}, "midturn_redirect", "begin_iteration"),
+    ({"agent/interrupt_control.py": ("[Additional user correction]", "[More]")}, "midturn_redirect", "redirect"),
+    ({"agent/prompt_builder.py": ('STEER_DISPLAY_KIND = "steer"', 'STEER_DISPLAY_KIND = "steered"')}, "midturn_steer", "STEER_DISPLAY_KIND"),
+    ({"agent/prompt_builder.py": ('STEER_MARKER_CLOSE = "[/OUT-OF-BAND USER MESSAGE]"', 'STEER_MARKER_CLOSE = "[/USER]"')}, "midturn_steer", "STEER_MARKER_CLOSE"),
+    ({"agent/prompt_builder.py": ('f"\\n\\n{STEER_MARKER_OPEN}\\n{steer_text}\\n{STEER_MARKER_CLOSE}"', 'f"{STEER_MARKER_OPEN}{steer_text}{STEER_MARKER_CLOSE}"')}, "midturn_steer", "format_steer_marker"),
+    ({"agent/prompt_builder.py": ('"display_kind": STEER_DISPLAY_KIND}', '"kind": STEER_DISPLAY_KIND}')}, "midturn_steer", "display_kind"),
+    ({"agent/interrupt_control.py": ('"\\n".join(text for _, text in parts)', '" ".join(text for _, text in parts)')}, "midturn_steer", "_set_steer_parts"),
+    ({"agent/conversation_loop.py": ('{"role": "user", "content": text, "api_content": correction}', '{"role": "assistant", "content": text, "api_content": correction}')}, "midturn_redirect", "role"),
+    ({"agent/conversation_loop.py": ('{"role": "user", "content": text, "api_content": correction}', '{"role": "user", "content": "> " + text, "api_content": correction}')}, "midturn_redirect", "content"),
+    ({"agent/prompt_builder.py": ('return {"role": "user", "content": format_steer_marker(steer_text).lstrip(),', 'return {"role": "assistant", "content": format_steer_marker(steer_text).lstrip(),')}, "midturn_steer", "role"),
+    ({"gateway/run_busy.py": ("json.dumps(origin, ensure_ascii=True)", "json.dumps(origin, ensure_ascii=True, indent=2)")}, "midturn_envelope", "indent"),
+    ({"gateway/run_busy.py": ("json.dumps(origin, ensure_ascii=True)", "str(origin)")}, "midturn_envelope", "json.dumps"),
+    ({"gateway/run_busy.py": ("Do not guess a reply destination when these fields are insufficient.", "Do not guess.")}, "midturn_envelope", "三行来源说明"),
+    ({"gateway/run_busy.py": ('"from_bot": True if source.is_bot else None,', '"bot": True if source.is_bot else None,')}, "midturn_envelope", "from_bot"),
+], ids=lambda x: x if isinstance(x, str) else "edit")
+def test_midturn_checks_flip_to_changed_when_the_frozen_shape_moves(tmp_path, edit, check, word):
+    r = HC.doctor(host(tmp_path, **edit))
+    c = one_check(r, check)
+    assert c["status"] == "changed" and word in c["detail"] and "midturn_words" in c["affects"], c
+    assert [x["id"] for x in r["checks"] if x["status"] != "ok"] == [check] and r["exit_code"] == 1
+
+
+@pytest.mark.parametrize("rel,check", [("agent/conversation_loop.py", "midturn_redirect"), ("agent/turn_iteration_prep.py", "midturn_redirect"), ("agent/interrupt_control.py", "midturn_redirect"),
+                                       ("agent/prompt_builder.py", "midturn_steer"), ("gateway/run_busy.py", "midturn_envelope")])
+def test_midturn_checks_say_not_checked_when_a_file_is_gone_never_ok(tmp_path, rel, check):
+    r = HC.doctor(host(tmp_path, **{rel: None}))
+    c = one_check(r, check)
+    assert c["status"] == "missing" and rel in c["detail"] and r["exit_code"] == 1
+
+
+def test_midturn_baseline_is_ok_on_the_frozen_snippets_and_names_what_it_checked(tmp_path):
+    r = HC.doctor(host(tmp_path))
+    for cid in ("midturn_redirect", "midturn_steer", "midturn_envelope"):
+        assert one_check(r, cid)["status"] == "ok" and "v0.23.2" in one_check(r, cid)["detail"]

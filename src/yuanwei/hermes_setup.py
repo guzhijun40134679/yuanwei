@@ -549,7 +549,8 @@ def apply_uninstall(hermes_home, host_reloaded=False, dry_run=False, hermes_cmd=
             p.unlink()
         steps.append({"step": "delete:" + rel, "status": "would_delete" if dry_run else "deleted"})
         changed = True
-    for name in ("status.json", "owner-skips.json", "owner-skips.lock", "skip-reasons.json", "skip-reasons.lock"):
+    for name in ("status.json", "owner-skips.json", "owner-skips.lock", "skip-reasons.json", "skip-reasons.lock", "clarify-counts.json", "clarify-counts.lock",
+                 "internal-errors.json", "internal-errors.lock"):     # 0.1.0a8：提问卡回答的计数、内部错误的累计，和跳过原因一样处理
         st_file = h / "yuanwei" / name                                               # 原委运行计数；只在宿主重载后删，不动库和工作区名字
         if st_file.exists() and not kept:
             if not dry_run:
@@ -681,6 +682,11 @@ def _status_extra(out, h, cpath, db, notes):
         out["vectors"] = {"enabled": False}
 
 
+SQ_TURNS_NOTE = ("开始（started）不含 left_out（正在进行的那一轮、你要求删掉的轮、确认删除那一轮），所以 started＝recorded＋unrecorded＋host_started。没记＝开始了、库里没有它的话，"
+                 "也不是你要求删掉的、不是宿主自己开的（host_started）。按了停止、没答完、上一轮还在存、库忙排队待补的也算在没记里；Hermes 正在答的那一轮也可能暂时算在里面；"
+                 "升级到 0.1.0a9 以前宿主自己开的轮分不出来，也算在没记里。只数 hermes 的轮。只有计数。")
+
+
 def install_status(hermes_home, sys_=None, hermes_python=None):
     """`yuanwei status hermes`（给了 sys_ 才会去查 Hermes 运行环境里有没有 NumPy：要跑 Hermes 的启动命令和那个 Python，所以只有命令行入口给）：装没装、插件文件有没有被改、memory.provider 现在是谁、读取范围和主人（只报平台和个数）、认得的工作区和各自记了几条、运行时的数。只读。"""
     from . import hermes_workspace as HW
@@ -752,6 +758,14 @@ def install_status(hermes_home, sys_=None, hermes_python=None):
             c = sqlite3.connect("file:%s?mode=ro" % db, uri=True, timeout=3.0)
             try:
                 counts = {r[0]: r[1] for r in c.execute("SELECT ns, COUNT(*) FROM messages GROUP BY ns")}
+                try:                                                             # 清单第 55 条：全库的对账（开始几轮、记下几轮、没记几轮、宿主自己开的几轮）；只有计数
+                    from . import sqlstore as SQ
+                    a_ = SQ.turn_accounting(c, host="hermes")                       # 只数 hermes 的轮：同一个库里别的宿主（只读接头从不写）的轮不算
+                    out["turn_accounting"] = {"started": a_["counted"], "recorded": a_["recorded"], "unrecorded": a_["unrecorded"], "host_started": a_["host_started"],
+                                              "left_out": a_["current"] + a_["excluded"], "note": SQ_TURNS_NOTE}
+                except sqlite3.Error as e:
+                    out["turn_accounting"] = {"problem": "unreadable", "error": type(e).__name__}
+                    notes.append("对账读不了（%s）：这不是「没有丢」；库可能正在写，或者是老版本的库" % type(e).__name__)
             finally:
                 c.close()
         except sqlite3.Error:
@@ -770,6 +784,10 @@ def install_status(hermes_home, sys_=None, hermes_python=None):
     out["skip_reasons"] = SK.read(str(h))
     if out["skip_reasons"]["problem"]:
         notes.append("跳过原因的累计文件读不了（%s），不能当作没有跳过；原文件没有改动。" % out["skip_reasons"]["problem"])
+    from . import askcounts as AC                                                  # 提问卡里的回答，按库累计（存下几条、clarify_* 备注各几次、最近 30 次的时间；没有原话）。clarify_* 不是跳过的轮次：那一轮照常记了，只是那道题的回答没收
+    out["clarify"] = AC.read(str(h))
+    if out["clarify"]["problem"]:
+        notes.append("提问卡回答的累计文件读不了（%s），不能当作没有收过；原文件没有改动。" % out["clarify"]["problem"])
     from . import internal_errors as IE                                            # 工具里没归类的内部错误，按库累计（类名、抛出的文件和行号、次数、最近 30 次的时间；没有消息文字）
     out["internal_errors"] = IE.read(str(h))
     if out["internal_errors"]["problem"]:

@@ -6,6 +6,8 @@ import unicodedata
 from collections import Counter
 from fractions import Fraction
 
+from . import asked as AS
+
 BM25_K1 = 1.2
 BM25_B = 0.75
 RRF_K = 60
@@ -18,8 +20,9 @@ def _np():
 
 
 def tokenize(text):
-    """施工单 §3.4：NFKC＋小写；汉字段取相邻两字（单字段取这一字）；[0-9a-z]+ 取整段；其余分隔。"""
-    t = unicodedata.normalize("NFKC", text).lower()
+    """施工单 §3.4：NFKC＋小写；汉字段取相邻两字（单字段取这一字）；[0-9a-z]+ 取整段；其余分隔。
+    0.1.0a8：先把提问卡回答的标签字样（「（助手问）」「（用户选）」等）换成空格，免得问话里有「助手」「用户」「选项」就命中每一条提问卡；没有标签的字逐字不变。"""
+    t = unicodedata.normalize("NFKC", AS.strip_tags(text)).lower()
     out = []
     for m in re.finditer(r"[一-鿿]+|[0-9a-z]+", t):
         seg = m.group(0)

@@ -116,9 +116,9 @@ TABLES = {
     "read_log": tbl("scrub", {
         "id": col(C, "keep"), "ns": col(C, "keep"), "host": col(C, "keep"), "session_id": col(C, "keep"), "branch": col(C, "keep"), "turn_id": col(C, "keep"), "gen": col(C, "keep"),
         "call_id": col(C, "keep"), "entry": col(C, "keep"), "kind": col(C, "keep"),
-        "detail": col(H, "scrub", "JSON：消息编号和片段范围（spans）、返回文字的哈希前缀（fingerprint）、字数、固定原因码。提到被删消息编号的行，spans 和 fingerprint 清掉；解析不了的行整个 detail 换成 {}"),
+        "detail": col(H, "scrub", "JSON：消息编号和片段范围（spans）、返回文字的哈希前缀（fingerprint）、字数、固定原因码。提到被删消息编号的行，spans 和 fingerprint 清掉；解析不了的行整个 detail 换成 {}。0.1.0a9（清单第 55 条）起另有 kind=not_recorded 的行，detail 永远只有 {\"reason\": \"host_started_turn\"}（宿主自己开的轮，对账用），没有原话、没有编号，不用清"),
         "ts": col(C, "keep"),
-    }, "读取登记：只有编号、范围、字数、哈希前缀；提到被删消息的清 spans 和 fingerprint"),
+    }, "读取登记：只有编号、范围、字数、哈希前缀；提到被删消息的清 spans 和 fingerprint；not_recorded 的行只有一个固定原因"),
     "connections": tbl("keep", {
         "handle_sha": col(C, "keep", "随机句柄的哈希"), "ns": col(C, "keep"), "host": col(C, "keep"), "session_id": col(C, "keep"), "branch": col(C, "keep"), "created_at": col(C, "keep"),
         "claimed_by": col(C, "keep"), "claimed_at": col(C, "keep"), "closed_at": col(C, "keep"), "turn_id": col(C, "keep"),

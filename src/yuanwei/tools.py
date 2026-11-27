@@ -7,6 +7,7 @@
 import json
 import threading
 
+from . import asked as AS
 from . import cuts as CU
 from . import hosts as H
 from . import pack as PK
@@ -46,9 +47,10 @@ def _err(reason, message):
 
 
 class ToolSurface:
-    def __init__(self, mem, access, profile, identity_source, home=None):
+    def __init__(self, mem, access, profile, identity_source, home=None, writes=False):
         self.mem, self.acc, self.profile, self.ids = mem, access, profile, identity_source
         self.home = home                                               # Hermes 家目录：没归类的内部错误按它累计（internal_errors.py）；没有（比如 MCP 单机）就不累计
+        self.writes = writes                                           # 这个接头自己负责写入（只有 Hermes 的）：status 才给「开始几轮、记下几轮、没记几轮」；MCP 等别的宿主的 status 输出逐字节不变
         self._bind_lock = threading.Lock()                             # 查调用登记表用身份源自己的只读连接（不和工具调用里的读取共用连接），这把锁只管那一条连接
         self._lock = threading.Lock()                                  # 一个 MCP 服务一次只处理一个工具调用：共用一条 SQLite 连接，不让两个调用的事务交错
 
@@ -264,8 +266,12 @@ class ToolSurface:
         body = []
         if res["step"]:
             body.append("所属的步：%s" % res["step"]["step_id"])
+        try:
+            content = (self.mem.store.get_message(self.mem.ns, res["message_id"]) or {}).get("content")     # 只为给提问卡回答的句子补标签显示（0.1.0a8）；取不到就不补
+        except Exception:                                                                       # noqa: BLE001
+            content = None
         for s in res["sentences"]:
-            body.append("句 %s［%d–%d］%s：%s" % (s["sentence_id"], s["range"][0], s["range"][1], PK.ROLE_CN[s["role"]], mp.encode(s["text"])[:80]))
+            body.append("句 %s［%d–%d］%s：%s" % (s["sentence_id"], s["range"][0], s["range"][1], PK.ROLE_CN[s["role"]], mp.encode(AS.shown(content, s["range"][0], s["text"]) if s["role"] == "user" else s["text"])[:80]))
             for a in s["attachments"]:
                 what = a.get("occasion_title") or a.get("thread_name") or a.get("target")
                 body.append("  → %s｜%s｜%s｜%s%s" % (a["kind"], mp.encode(str(what))[:60], a["confidence"], ("候选 %s｜" % ",".join(a["candidates"])) if a["candidates"] else "",
@@ -286,6 +292,32 @@ class ToolSurface:
         return self._finish(tk, text, [], {"sentences": len(res["sentences"])})
 
     # ---------------------------------------------------------------- status
+    TURNS_NOTE = ("开始＝started，不含当前这一轮和你要求删掉的轮，所以 started＝recorded＋unrecorded＋auto。没记＝这一轮开始了、库里没有它的话，也不是你要求删掉的、不是宿主自己开的（auto）。"
+                  "按了停止、没答完、上一轮还在存、库忙排队待补的也算在没记里（存完或补上以后会变少）；升级到 0.1.0a9 以前宿主自己开的轮分不出来，也算在没记里；宿主自己开的轮里你又说的话不记，那一轮算在没记里。只有计数、固定的原因名和时间，没有原话。")
+    NOT_LOSSES = ("prefetch_error", "owner_unknown", "not_owner", "bot_author")             # 这几个原因不是「丢了一轮」（预取出错不影响写入；不是主人、机器人的话本来就不记）
+
+    def _turn_numbers(self, tk):
+        """这个会话开始几轮、记下几轮、没记几轮（0 也给）、宿主自己开的几轮（auto）；加这个库最近 3 次「这一轮没记」的原因和时间。读不出来就照实说，不当成零。"""
+        i = tk.ident
+        out = {"note": self.TURNS_NOTE}
+        try:
+            a = self.mem.store.turn_accounting(i.host, i.session_id, i.branch or "", current_turn=i.turn_id)
+            out["session"] = {"started": a["counted"], "recorded": a["recorded"], "unrecorded": a["unrecorded"], "auto": a["host_started"]}
+        except Exception as e:                                                                  # noqa: BLE001
+            out["session"] = {"unreadable": type(e).__name__}
+        recent, problem = [], None
+        try:
+            from . import skipreasons as SK
+            r = SK.read(self.home)
+            problem = r["problem"]
+            recent = [{"reason": x["why"], "t": x["t"]} for x in r["recent"] if x["why"] not in self.NOT_LOSSES][-3:]
+        except Exception as e:                                                                  # noqa: BLE001
+            problem = type(e).__name__
+        out["recent_not_recorded"] = recent
+        if problem:
+            out["recent_unreadable"] = problem
+        return out
+
     def _status(self, tk, args):
         st = self.mem.status()                                                                 # 不拉起整理
         out = {"host": self.profile.name, "host_version": self.profile.version_pin, "identity_chain": self.profile.identity,
@@ -295,6 +327,8 @@ class ToolSurface:
                "failed_steps": st["failed_steps"], "abandoned_steps": st["abandoned_steps"], "skipped_steps": st["skipped_steps"], "done_steps": st["done_steps"],
                "long_unorganized": st["long_unorganized"], "paused": bool(st["paused"]), "paused_reason": (st["paused"] or {}).get("reason") if st["paused"] else None,
                "retrieval": st["retrieval"], "write": st["write"], "cost": st["cost"], "cost_today": st["cost_today"], "cut": st["cut"], "operational": st["operational"]}
+        if self.writes:
+            out["turns"] = self._turn_numbers(tk)
         if not st["organize"]["on"]:                                                           # 整理关着：不给积压、超长未整理这类数，改说「整理已关」（开着时这一项不出现，输出和以前一样）
             del out["backlog"], out["long_unorganized"]
             out["organize"] = {"text": "整理已关", "sealed_steps_waiting": st["organize"]["sealed_steps_waiting"], "waiting_text": st["organize"]["waiting_text"]}

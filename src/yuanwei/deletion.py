@@ -18,6 +18,7 @@ import time
 import uuid
 from typing import Dict, List, NamedTuple, Optional, Tuple
 
+from . import asked as AS
 from . import contract as WC
 from . import vectors as VX
 from .errors import NotFound, YuanweiError
@@ -210,7 +211,7 @@ class DeletionService:
             r2 = c.execute("SELECT content, received_at, seq FROM messages WHERE host=? AND session_id=? AND branch=? AND role='user' ORDER BY received_at, seq LIMIT 1", (h, s, b)).fetchone()
             if r2 is not None and (head_row is None or (r2["received_at"], r2["seq"]) < (head_row["received_at"], head_row["seq"])):
                 head_row = r2
-        head = head_row["content"].strip().replace("\n", " ")[:15] if head_row is not None else None
+        head = AS.opening_of(head_row["content"]).strip().replace("\n", " ")[:15] if head_row is not None else None     # 0.1.0a8：折进了提问卡回答的，只取用户自己打的那段（别的话不变）
         return ConvInfo(conv_id, kind, host, first, last, n, by_ns, len(trip), head)
 
     def _resolve(self, c, conv_id):

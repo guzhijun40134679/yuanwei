@@ -318,6 +318,47 @@ class Access:
             c.execute("INSERT INTO turn_tokens (ns, host, session_id, branch, event_key, turn_id, created_at) VALUES (?,?,?,?,?,?,?)", (self.ns, host, session_id, branch, event_key, tok, self._now()))
         return tok
 
+    def event_turn(self, host, session_id, event_key, branch=""):
+        """Hermes 开轮用（清单第 56 条第 3 节）：和 turn_token 一样，同一个事件键重送、进程重启、崩溃重来得到同一个轮次号；不一样的是，那一轮已经「结束」了，再来同一个键（重新生成、/retry、
+        压缩换号以后话一样轮次号也一样）就给新的轮次号，登记在下一个空键上（event_key＋"\x1f2"、"\x1f3"…），旧的一轮一个字不变。
+        结束＝同一（工作区、宿主、会话、分支）里有更晚的轮次，或者 turn_messages 里有它绑的消息（不限会话，压缩换号也算）。例外：确认删除那一轮（no_record_turns）永远当没结束——和今天一样，它不记。
+        确认删除会把这段对话里别的键改成假名、只留确认那一轮的键（可能是续号键 K\x1f2，于是 K 空着）：所以先找「键等于 event_key 或以 event_key＋\x1f 开头、而且在 no_record_turns 里」的令牌，有就直接还它。
+        返回 (令牌, reissued)：reissued＝这个令牌登记在带 \x1f 的续号键上（第 2 次及以后；重送同一个续号令牌也是 True）。窗口层靠它认出「这句话是重新生成／重发」，只认关（见 WindowService.process_input 的 closes_only）。
+        event_key 里不许带 \x1f（那是续号的分隔符）。整个查找、判断、登记在一个事务里。"""
+        self._need_str("host", host), self._need_str("session_id", session_id), self._need_str("event_key", event_key), self._need_str("branch", branch, True)
+        if "\x1f" in event_key:
+            raise ValueError("event_key 里不能带 \\x1f")
+        with self.store.tx() as c:
+            prefix = event_key + "\x1f"
+            hit = c.execute("SELECT t.event_key, t.turn_id FROM turn_tokens t JOIN no_record_turns n ON n.turn_id=t.turn_id "
+                            "WHERE t.ns=? AND t.host=? AND t.session_id=? AND t.branch=? AND (t.event_key=? OR substr(t.event_key, 1, ?)=?) ORDER BY t.created_at DESC, t.rowid DESC LIMIT 1",
+                            (self.ns, host, session_id, branch, event_key, len(prefix), prefix)).fetchone()
+            if hit is not None:
+                return hit["turn_id"], hit["event_key"] != event_key
+            last_n, last = 0, None
+            while True:
+                n = last_n + 1
+                key = event_key if n == 1 else "%s\x1f%d" % (event_key, n)
+                r = c.execute("SELECT turn_id FROM turn_tokens WHERE ns=? AND host=? AND session_id=? AND branch=? AND event_key=?", (self.ns, host, session_id, branch, key)).fetchone()
+                if r is None:
+                    break
+                last_n, last = n, r["turn_id"]
+            if last is not None and not self._token_ended(c, host, session_id, branch, last):
+                return last, last_n >= 2
+            n = last_n + 1
+            key = event_key if n == 1 else "%s\x1f%d" % (event_key, n)
+            tok = "t-" + secrets.token_hex(8)
+            c.execute("INSERT INTO turn_tokens (ns, host, session_id, branch, event_key, turn_id, created_at) VALUES (?,?,?,?,?,?,?)", (self.ns, host, session_id, branch, key, tok, self._now()))
+            return tok, n >= 2
+
+    def _token_ended(self, c, host, session_id, branch, turn_id):
+        if c.execute("SELECT 1 FROM no_record_turns WHERE turn_id=?", (turn_id,)).fetchone():
+            return False                                                    # 确认删除那一轮：永远当没结束（今天就是这样，它不记）
+        if c.execute("SELECT 1 FROM turn_messages WHERE turn_id=? LIMIT 1", (turn_id,)).fetchone():
+            return True
+        t = c.execute("SELECT gen FROM turns WHERE ns=? AND host=? AND session_id=? AND branch=? AND turn_id=?", (self.ns, host, session_id, branch, turn_id)).fetchone()
+        return t is not None and c.execute("SELECT 1 FROM turns WHERE ns=? AND host=? AND session_id=? AND branch=? AND gen>? LIMIT 1", (self.ns, host, session_id, branch, t["gen"])).fetchone() is not None
+
     # ------------------------------------------------------------------ 持续禁读的回执：每个宿主轮次只送一次
     def claim_receipt(self, host, session_id, branch, turn_id):
         """这一轮的持续禁读回执还没送过就登记一笔并返回 True；已经送过返回 False（同一轮多次钩子、压缩续跑不再刷出第二句）。"""

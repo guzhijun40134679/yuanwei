@@ -15,6 +15,7 @@ import array
 import contextlib
 import json
 import sqlite3
+import threading
 import time
 
 from . import contract as WC
@@ -187,10 +188,111 @@ def _dumps(obj):
     return json.dumps(obj, ensure_ascii=False, sort_keys=True)
 
 
+HOST_STARTED_DETAIL = _dumps({"reason": "host_started_turn"})         # 宿主自己开的轮：read_log 里 kind=not_recorded 那一行的 detail，只有这一个固定原因
+
+
+def turn_accounting(conn, host=None, session_id=None, branch="", current_turn=None):
+    """对账（清单第 55 条，0.1.0a9）：开始几轮、记下几轮、没记几轮、宿主自己开的轮几轮。不动表结构；全部按 turn_id 去重（COUNT DISTINCT 的意思），所以压缩换号、同一轮挂在几个会话名下不会算重。
+    给 host（和 session_id、branch）就只数这个会话，不给就数整个库。conn：只读连接也行。读不出来（没有这几张表、库坏了）会抛 sqlite3.Error，调用方要报出来，不能当成零。
+    * 开始＝turns 里的轮；记下＝turn_id 在 turn_messages 里（只按 turn_id 连，不看会话和工作区）。
+    * 每一轮按这个先后只落进一类：当前这一轮（current）；记下（recorded）；没记下但不算丢的（excluded：no_record_turns 里的确认删除那一轮，或被删除覆盖的轮——
+      del_scope 连 deletions，同宿主、会话、分支，开始时间不晚于删除登记的时间）；宿主自己开的轮（host_started：读取登记里有 not_recorded／host_started_turn）；其余都是没记（unrecorded）。
+    * **不看 turns.refused**：禁读的轮照样记，不能因为它去掉。
+    返回 {"started", "recorded", "unrecorded", "host_started", "excluded", "current", "counted"}：started＝各项相加；counted＝started 去掉 current 和 excluded（status 给人看的「开始」）。
+    **升级到 0.1.0a9 以前宿主自己开的轮没有 not_recorded 那一行，分不出来，会算在 unrecorded 里**（写 not_recorded 失败时也一样）。"""
+    if host is None:
+        where, args = "", ()
+    elif session_id is None:
+        where, args = " WHERE host=?", (host,)                                          # 只数这个宿主（yuanwei status hermes 只数 hermes，同库里别的宿主的轮不算）
+    else:
+        where, args = " WHERE host=? AND session_id=? AND branch=?", (host, session_id, branch or "")
+    turns = conn.execute("SELECT DISTINCT turn_id, host, session_id, branch, created_at FROM turns" + where, args).fetchall()
+    recorded = {r[0] for r in conn.execute("SELECT DISTINCT turn_id FROM turn_messages")}
+    no_record = {r[0] for r in conn.execute("SELECT turn_id FROM no_record_turns")}
+    by_host = {r[0] for r in conn.execute("SELECT DISTINCT turn_id FROM read_log WHERE kind='not_recorded' AND detail=?", (HOST_STARTED_DETAIL,))}
+    covers = {}
+    for r in conn.execute("SELECT s.host, s.session_id, s.branch, d.registered_at FROM del_scope s JOIN deletions d ON d.del_id=s.del_id"):
+        covers.setdefault((r[0], r[1], r[2]), []).append(r[3])
+    out = {"recorded": set(), "current": set(), "excluded": set(), "host_started": set(), "unrecorded": set()}
+    for tid, h, sid, br, created in turns:
+        if tid in out["current"] or any(tid in v for v in out.values()):
+            continue                                                                    # 同一轮挂在几个会话名下（压缩换号）：只算一次
+        if current_turn is not None and tid == current_turn:
+            out["current"].add(tid)
+        elif tid in recorded:
+            out["recorded"].add(tid)
+        elif tid in no_record or any(created is not None and created <= at for at in covers.get((h, sid, br), ())):
+            out["excluded"].add(tid)
+        elif tid in by_host:
+            out["host_started"].add(tid)
+        else:
+            out["unrecorded"].add(tid)
+    res = {k: len(v) for k, v in out.items()}
+    res["started"] = sum(res.values())
+    res["counted"] = res["started"] - res["current"] - res["excluded"]                  # 给人看的「开始几轮」：去掉当前这一轮和不算丢的（确认删除那一轮、被删除覆盖的），保证 counted == recorded + unrecorded + host_started
+    return res
+
+
+class _Done:
+    """_Conn.execute 返回的小对象：行已经在锁里取完、游标已经关了；只留 fetchone／fetchall／__iter__／rowcount（这几样是全部代码里用到的）。"""
+    __slots__ = ("_rows", "_i", "rowcount")
+
+    def __init__(self, rows, rowcount):
+        self._rows, self._i, self.rowcount = rows, 0, rowcount
+
+    def fetchone(self):
+        if self._i >= len(self._rows):
+            return None
+        self._i += 1
+        return self._rows[self._i - 1]
+
+    def fetchall(self):
+        out, self._i = self._rows[self._i:], len(self._rows)
+        return out
+
+    def __iter__(self):
+        return iter(self.fetchall())
+
+
+class _Conn(sqlite3.Connection):
+    """一个库连接被 Hermes 的几个线程共用（主线程开轮、自己的后台线程 sync_turn／end_session、宿主的后台线程）：一个线程的 BEGIN 会撞上另一个线程没提交的事务，
+    读也会读到别人没提交的行。所以每个连接一把可重入锁 _gate：execute 在锁里执行、当场把行取完、关游标；Store.tx()／read_tx() 整段握着锁；close() 也在锁里。
+    **不限等待时间**：持锁的人只在一次 SQLite 调用里（或在 tx() 的函数体里，函数体里不许去拿别的锁，见测试），不联网；不限等待，读就不会因为等锁而报新错。
+    锁次序：_gate 永远在最里面（任何别的锁都在它外面）。
+    只有 execute 一个入口被包住：cursor／executemany／executescript 在这个代码库里没有人用，会绕过锁，所以显式拒绝（以后要用，先包住再放开）。
+    只读连接（Store.open_readonly，只给命令行用）不用这个类。"""
+
+    def __init__(self, *a, **kw):
+        super().__init__(*a, **kw)
+        self._gate = threading.RLock()
+
+    def execute(self, sql, params=()):
+        with self._gate:
+            cur = sqlite3.Connection.cursor(self)
+            try:
+                cur.execute(sql, params)
+                return _Done(cur.fetchall(), cur.rowcount)
+            finally:
+                cur.close()
+
+    def cursor(self, *a, **kw):
+        raise RuntimeError("Store 的连接不给 cursor：会绕过线程锁，请用 execute")
+
+    def executemany(self, *a, **kw):
+        raise RuntimeError("Store 的连接不给 executemany：会绕过线程锁，请用 execute")
+
+    def executescript(self, *a, **kw):
+        raise RuntimeError("Store 的连接不给 executescript：会绕过线程锁，请用 execute")
+
+    def close(self):
+        with self._gate:
+            super().close()
+
+
 class Store:
     def __init__(self, path, busy_ms=3000):
         self.path = path
-        self.conn = sqlite3.connect(path, timeout=busy_ms / 1000.0, isolation_level=None, check_same_thread=False)
+        self.conn = sqlite3.connect(path, timeout=busy_ms / 1000.0, isolation_level=None, check_same_thread=False, factory=_Conn)
         self.conn.row_factory = sqlite3.Row
         self.conn.execute("PRAGMA journal_mode=WAL")
         self.conn.execute("PRAGMA synchronous=NORMAL")
@@ -210,16 +312,22 @@ class Store:
         return s
 
     # ---------------------------------------------------------------- 事务与迁移
+    def _gate(self):
+        """这个连接的线程锁（_Conn._gate）；只读打开的 Store（命令行用）没有，用一个什么都不做的。"""
+        g = getattr(self.conn, "_gate", None)
+        return g if g is not None else contextlib.nullcontext()
+
     @contextlib.contextmanager
     def tx(self):
-        self.conn.execute("BEGIN IMMEDIATE")
-        try:
-            yield self.conn
-        except BaseException:
-            self.conn.execute("ROLLBACK")
-            raise
-        else:
-            self.conn.execute("COMMIT")
+        with self._gate():
+            self.conn.execute("BEGIN IMMEDIATE")
+            try:
+                yield self.conn
+            except BaseException:
+                self.conn.execute("ROLLBACK")
+                raise
+            else:
+                self.conn.execute("COMMIT")
 
     def _fire(self, point):
         if self.fault is not None:
@@ -227,15 +335,16 @@ class Store:
 
     @contextlib.contextmanager
     def read_tx(self):
-        """一致的读事务（快照用）：里面的几次查询看到同一个时点。已经在事务里就直接用。"""
-        if self.conn.in_transaction:
-            yield self.conn
-            return
-        self.conn.execute("BEGIN")
-        try:
-            yield self.conn
-        finally:
-            self.conn.execute("COMMIT")
+        """一致的读事务（快照用）：里面的几次查询看到同一个时点。已经在事务里就直接用（先拿锁再看，别的线程的事务不会被当成自己的）。"""
+        with self._gate():
+            if self.conn.in_transaction:
+                yield self.conn
+                return
+            self.conn.execute("BEGIN")
+            try:
+                yield self.conn
+            finally:
+                self.conn.execute("COMMIT")
 
     # ---------------------------------------------------------------- 删除相关：捕获序号、删除版本、屏障、守卫
     def take_capture(self):
@@ -255,6 +364,10 @@ class Store:
     def db_id(self):
         r = self.conn.execute("SELECT v FROM store_meta WHERE k='db_id'").fetchone()
         return r[0] if r else ""
+
+    def turn_accounting(self, host=None, session_id=None, branch="", current_turn=None):
+        """见模块里的 turn_accounting。"""
+        return turn_accounting(self.conn, host, session_id, branch, current_turn)
 
     @staticmethod
     def key_sha(host, session_id, branch, message_id):
@@ -320,7 +433,8 @@ class Store:
                 c.execute("UPDATE schema_meta SET version=?", (v,))
 
     def close(self):
-        self.conn.close()
+        with self._gate():
+            self.conn.close()
 
     # ---------------------------------------------------------------- 工作区
     def ensure_workspace(self, ns, index_version, kind="L", store_version=1, config=None, now=None):

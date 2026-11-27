@@ -1,6 +1,7 @@
 """小件：估算词元、二字组、提交后按收据恢复。"""
 import math
 
+from . import asked as AS
 from . import storeerr as WS
 
 TOKEN_RATIO_PERCENT = 52  # 尺子 1：ceil(0.52 × 码点数)，用整数算避免浮点误差
@@ -63,8 +64,8 @@ def est_lines(lines, ruler=1):
 
 
 def bigrams(text):
-    out, run = set(), []
-    for ch in text + "\0":
+    out, run = set(), []                                       # 0.1.0a8：先去掉提问卡回答的标签字样（和 rank.tokenize 同一条规则）；没有标签的字逐字不变
+    for ch in AS.strip_tags(text) + "\0":
         if ch.isalnum():
             run.append(ch.lower())
         else:

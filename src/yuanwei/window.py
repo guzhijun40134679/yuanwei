@@ -27,9 +27,12 @@ CONFIRM_WORD = "确认开启"
 DELETE_CONFIRM_WORD = "确认删除"
 CONFIRM_PROMPT = "要在这个窗口重新使用长期记忆吗？回复「确认开启」即可。"
 NOT_CONFIRMED_RECEIPT = "记忆仍是关着的；要打开，请让我再申请一次后回复「确认开启」，或者直接发 #yuanwei-mem。"
+REISSUED_RECEIPT = "这一句和这个对话前面某一轮的原话、轮次号都相同，多半是重新生成或重发，没有照它打开记忆读取或删除。要打开或删除，请再发一条新消息。"
+REISSUED_VOIDED_RECEIPT = "这一句和这个对话前面某一轮的原话、轮次号都相同，多半是重新生成或重发，没有照它确认；等确认的那次申请已作废。要打开或删除，请重新提出来，再照提示确认。"
 CLOSE_FAILED_RECEIPT = "没能确认这个窗口的记忆读取已经关闭；这一轮已先暂停读取。请再说一次，或在消息第一行写 #yuanwei-nomem。"
 NOTICE_CLOSED = "这个窗口的记忆读取已关闭，直到你明确重新允许；此前已经交给模型的内容不会因此撤回。"
 NOTICE_OPENED = "这个窗口的记忆读取已重新打开。"
+NOTICE_HISTORY_CLOSED = "这个对话一开始就带着以前的内容，而你有对话关着记忆，所以这里也先关着。要用，在消息第一行写 #yuanwei-mem。"
 NOTICE_RESTORED_CLOSED = "你恢复的这个窗口，记忆读取是关着的；要用请让我申请开启后回复「确认开启」，或在消息第一行写 #yuanwei-mem。"
 CLOSED_HINT = "这个窗口的记忆读取是关着的；要重新使用，请让我申请开启后回复「确认开启」，或在消息第一行写 #yuanwei-mem。"
 PENDING_HINT = "窗口身份待确认：没能确认这个对话对应哪个窗口，所以暂停读取（没有默认打开，也没有关整个工作区）。在消息第一行写 #yuanwei-mem 或 #yuanwei-nomem 可以明确这个窗口的开关。"
@@ -90,6 +93,7 @@ class WindowRef:
     pause_reason: Optional[str]            # window_identity_pending｜window_subagent｜window_state_unreadable
     bound_via: Optional[str] = None
     created: bool = False                  # 这次调用是不是刚建立了绑定
+    history_closed: bool = False           # 这次新建的窗口是不是因为「对话一开始就带着历史、而库里有窗口关着」才从关开始（清单第 56 条第 8 节）
 
 
 class WindowView(NamedTuple):
@@ -227,12 +231,18 @@ class WindowService:
             return self._paused("window_state_unreadable")
         return self._paused("window_identity_pending") if row is None else self._ref(row)
 
-    def bind_new(self, host, session_id, branch="", *, via="initialize", state=None):
-        """新窗口，用默认状态；这个宿主编号已经有绑定就原样返回（幂等，不改状态）。initialize 见到没见过的号、reset 用它。"""
+    def bind_new(self, host, session_id, branch="", *, via="initialize", state=None, history=False):
+        """新窗口，用默认状态；这个宿主编号已经有绑定就原样返回（幂等，不改状态）。initialize 见到没见过的号、reset 用它。
+        history 为真（宿主说这个没见过的会话一开始就带着历史：分支、压缩换号）而且这个库里此刻有任何一个窗口是关着的：新窗口从「关」开始
+        （origin 用 fork、没有父窗口、ctl_source 写 history_default）。判断和建窗口在同一个事务里；判断读库出错就抛出去，不绑，更不默认开。"""
         with self._lock, self.store.tx() as c:
             row = self._binding(c, host, session_id, branch)
             if row is not None:
                 return self._ref(row)
+            if history is True and state is None and c.execute("SELECT 1 FROM windows WHERE state='off' LIMIT 1").fetchone() is not None:
+                wid = self._new_window(c, host, "off", "fork", None, "history_default")
+                self._bind(c, host, session_id, branch, wid, via, None)
+                return WindowRef(wid, "off", 1, False, None, via, True, True)
             wid = self._new_window(c, host, state or self.default_state, "new", None, "default")
             self._bind(c, host, session_id, branch, wid, via, None)
             return WindowRef(wid, state or self.default_state, 1, False, None, via, True)
@@ -320,9 +330,10 @@ class WindowService:
             return CloseResult("applied", want, nv, False, op_id)
 
     def close(self, window_id, *, source, op_id, input_win_seq=None):
-        """source：command｜rule｜tool。写失败会抛异常，调用方不能当成已关。"""
-        if source not in ("command", "rule", "tool"):
-            raise ValueError("source 只能是 command、rule、tool")
+        """source：command｜rule｜tool｜clarify_answer（用户在助手的提问卡里打的回答里认出了「关」，点选的不算，0.1.0a8）｜midturn（用户在助手没答完时又发的话里认出了「关」，
+        来源没核实的插话也算，只会更严，0.1.0a9）；后两种只走关，不走开、不走确认。写失败会抛异常，调用方不能当成已关。"""
+        if source not in ("command", "rule", "tool", "clarify_answer", "midturn"):
+            raise ValueError("source 只能是 command、rule、tool、clarify_answer、midturn")
         return self._change(window_id, "close", source, op_id, input_win_seq)
 
     def open_window(self, window_id, *, source, op_id, input_win_seq=None):
@@ -364,8 +375,8 @@ class WindowService:
             steps.append(("close", "rule"))
         return ctl, steps
 
-    def input_seq_of(self, ref):
-        w = self.resolve(ref.host, ref.session_id, ref.branch or "")
+    def input_seq_of(self, ref, _raw=False):
+        w = self.resolve(ref.host, ref.session_id, ref.branch or "", _raw=_raw)
         if w.paused:
             return None
         with self._lock:
@@ -373,10 +384,15 @@ class WindowService:
                                         (w.window_id, ref.host, ref.session_id, ref.branch or "", ref.turn_id, ref.input_key)).fetchone()
         return r["win_seq"] if r else None
 
-    def process_input(self, ref, text, *, origin_verified, actor="main", capture=None):
+    def process_input(self, ref, text, *, origin_verified, actor="main", capture=None, closes_only=False):
         """一条可信用户输入的控制：口令、规则识别，按先后逐步应用。禁读一律生效；开（目前只有口令）要来源核过、没被设置挡住。
-        同一条输入重送：返回已有的结果，不再改状态（上次是 close_failed 的除外，会重试）。来源没核过：什么都不改。"""
+        同一条输入重送：返回已有的结果，不再改状态（上次是 close_failed 的除外，会重试）。来源没核过：什么都不改。
+        closes_only（0.1.0a10）：这一句和前面某一轮的原话、轮次号都相同（重新生成、重发；接头从 Access.event_turn 的 reissued 得知）。只认「关」：steps 只留 close，
+        待确认判断用空文字（有待确认就作废，永远不确认开启、不确认删除）。默认 False 时一个字节都不变。"""
         ctl, steps = self._plan(text)
+        orig_steps = steps
+        if closes_only:
+            steps = [st for st in steps if st[0] == "close"]
         base = dict(window_id=None, win_seq=None, command=ctl.kind, steps=(), state_before=None, state_after=None, control_version=None, reason=None, receipt=None, notice=None)
         if not origin_verified:
             return InputControl(outcome="unchanged", **dict(base, reason="origin_unverified"))
@@ -414,7 +430,7 @@ class WindowService:
                     seq = got["win_seq"]
             before = self.resolve(ref.host, ref.session_id, ref.branch or "", _raw=True)
             done, blocked, reason, voided_other = [], None, None, False
-            pend = self._pending_verdict(wid, seq, text) if new_input else None             # 待确认：只对「下一条输入」有效，不是确认就作废
+            pend = self._pending_verdict(wid, seq, "" if closes_only else text) if new_input else None             # 待确认：只对「下一条输入」有效，不是确认就作废
             deletion = None
             if pend == "confirm_delete":
                 deletion = self._do_delete(wid, seq, ref, capture)
@@ -445,11 +461,17 @@ class WindowService:
                 outcome = "closed" if after.state == "off" else "opened"
             else:
                 outcome = "blocked_by_setting" if blocked and not any(o == "applied" for _k, _s, o in done) else "unchanged"
-            if after.state == "off" or any(k == "open" and o == "applied" for k, _s, o in done):      # 一次关闭（或明确的开）落地了：不再「没确认」
+            explicit_open = not any(k == "close" for k, _s, _o in done) and any(k == "open" and o in ("applied", "noop") for k, _s, o in done)       # 明确的开：本来就开着（noop）也算；被设置挡住、迟到的不算
+            if after.state == "off" or any(k == "open" and o == "applied" for k, _s, o in done) or explicit_open:      # 一次关闭（或明确的开）落地了：不再「没确认」
                 self._suspect.discard((ref.host, ref.session_id, ref.branch or ""))
+            receipt = NOT_CONFIRMED_RECEIPT if voided_other and after.state == "off" else None
+            if closes_only and any(k == "open" for k, _s in orig_steps) and after.state == "off":
+                receipt = REISSUED_RECEIPT                                                   # 重新生成／重发：这句话里的开口令没有照办（窗口仍关着）
+            elif closes_only and pend in ("void", "void_other") and (is_confirm_line(text) or is_delete_confirm(text)):
+                receipt = REISSUED_VOIDED_RECEIPT                                            # 重新生成／重发：原文是确认开启／确认删除，等确认的申请被作废了
             res = InputControl(window_id=wid, win_seq=seq, command="confirm" if pend == "confirm" and not blocked else ctl.kind, steps=tuple(done), state_before=before.state, state_after=after.state,
                                control_version=after.control_version, outcome=outcome, reason=reason or ("pending_voided" if voided_other else None),
-                               receipt=NOT_CONFIRMED_RECEIPT if voided_other and after.state == "off" else None, notice={"closed": NOTICE_CLOSED, "opened": NOTICE_OPENED}.get(outcome))
+                               receipt=receipt, notice={"closed": NOTICE_CLOSED, "opened": NOTICE_OPENED}.get(outcome))
             if deletion is not None:
                 st = {"complete": "deleted", "cleaning": "deleting"}.get(deletion.status, "delete_failed")
                 res = res._replace(command="confirm_delete", outcome=st, reason=deletion.code, receipt=deletion.text, notice=None, deletion=deletion)

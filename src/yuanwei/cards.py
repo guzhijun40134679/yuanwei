@@ -7,6 +7,7 @@
 只读状态；不联网、不调模型。"""
 import re
 
+from . import asked as AS
 from . import contract as WC
 from . import lstate as LS  # noqa: F401
 from . import split as SP
@@ -62,17 +63,21 @@ def render_prompt(text, allow_summary_edit):
 def session_sentences(messages, ns, split_version="split-1"):
     """这一次会话切好的句子（编号 s1、s2……），每句多一个 fragment_id（存储里的句子编号）。split_version：切句版本（split-1 旧、split-2 新）。"""
     out = SP.sentences_of_session(messages, split_version)
+    content = {m["msg_id"]: m["content"] for m in messages}
     for s in out:
         s["fragment_id"] = WC.fragment_id(ns, s["msg_id"], s["start"], s["end"])
+        tag = AS.line_tag(content.get(s["msg_id"]), s["start"]) if s["role"] == "user" else None     # 只有用户那条才折进了回答；助手的话不补
+        if tag:
+            s["display"] = tag + s["text"]                     # 只给显示用（提问卡回答那几行切开以后，后面的句子补上这一行的标签）；存下的句子、锚点用 text，不变
     return out
 
 
 def sentence_line(s):
-    return "%s（%s，%s，%s）：%s" % (s["sid"], role_zh(s["role"]), s["msg_id"], s["date"] or "日期未知", s["text"])
+    return "%s（%s，%s，%s）：%s" % (s["sid"], role_zh(s["role"]), s["msg_id"], s["date"] or "日期未知", s.get("display") or s["text"])
 
 
-def _quote(s, chars):
-    t, cut = s["text"], ""
+def _quote(s, chars, v=None):
+    t, cut = (v.quote_text(s) if v is not None else s["text"]), ""
     if len(t) > chars:
         t, cut = t[:chars], CUT
     return "原话（%s，%s，%s）：「%s」%s" % (s["msg_id"], role_zh(s["role"]), s["date"] or "日期未知", t, cut)
@@ -92,8 +97,9 @@ def _quotes(rows, config):
 
 # ---------------------------------------------------------------- 卡片
 class _View:
-    def __init__(self, st):
+    def __init__(self, st, content_of=None):
         self.st = st
+        self._content_of, self._content = content_of, {}       # 按编号取原话正文（只为给提问卡回答的句子补标签显示用；没给就不补）
         self.nm, self.ds, self.tt, self.sm = LV.names(st), LV.descs(st), LV.titles(st), LV.summaries(st)
         self.occs = LV.thread_occasions(st)
         self.tsent, self.osent = LV.thread_sentences(st), LV.occasion_sentences(st)
@@ -108,6 +114,18 @@ class _View:
             for r in st["tables"][tb]:
                 if r["created_seq"] > self.occ_last.get(r["occasion_id"], 0):
                     self.occ_last[r["occasion_id"]] = r["created_seq"]
+
+    def quote_text(self, s):
+        """卡片里引的一句：提问卡回答那几行切开以后，后面的句子补上这一行的标签（只改显示）。别的句子原样。"""
+        if self._content_of is None or s.get("role") != "user":
+            return s["text"]
+        mid = s.get("msg_id")
+        if mid not in self._content:
+            try:
+                self._content[mid] = self._content_of(mid)
+            except Exception:                                  # noqa: BLE001  取不到正文就不补，照原样显示
+                self._content[mid] = None
+        return AS.shown(self._content[mid], s.get("start"), s["text"])
 
     def occasion_grams(self, oc):
         parts = [self.tt.get(oc, ""), self.sm.get(oc, "")] + [s["text"] for s in self.osent.get(oc, [])]
@@ -125,7 +143,7 @@ def thread_card_lines(v, tid, config, label=""):
     first, recent = _quotes(rows, config)
     for lab, group in (("最初", first), ("最近", recent)):
         for s in group:
-            out.append("  %s的话：%s" % (lab, _quote(s, config.excerpt_chars)))
+            out.append("  %s的话：%s" % (lab, _quote(s, config.excerpt_chars, v)))
     return out
 
 
@@ -136,7 +154,7 @@ def occasion_card_lines(v, oc, config, label=""):
     first, recent = _quotes(rows, config)
     for lab, group in (("最初", first), ("最近", recent)):
         for s in group:
-            out.append("    %s：%s" % (lab, _quote(s, config.excerpt_chars)))
+            out.append("    %s：%s" % (lab, _quote(s, config.excerpt_chars, v)))
     return out
 
 
@@ -164,9 +182,9 @@ class _Block:
         return out
 
 
-def candidate_blocks(st, ranked_ids, texts, config):
-    """候选主线块（最多 config.max_threads 条）和因条数上限被去掉的主线。返回 (blocks, dropped)。"""
-    v = _View(st)
+def candidate_blocks(st, ranked_ids, texts, config, content_of=None):
+    """候选主线块（最多 config.max_threads 条）和因条数上限被去掉的主线。返回 (blocks, dropped)。content_of：按编号取原话正文（只为补标签显示）。"""
+    v = _View(st, content_of)
     cands = [t for t in ranked_ids if t in v.nm or t in {r["thread_id"] for r in st["tables"]["threads"]}]
     keep = cands[:config.max_threads]
     dropped = [{"kind": "thread", "thread_id": t, "reason": "max_threads"} for t in cands[config.max_threads:]]
@@ -199,7 +217,7 @@ def build_request(st, ns, ranked_ids, messages, sentences, config, get_message, 
     prompt = render_prompt(prompt_text, allow_summary_edit)
     today = next((s["date"] for s in sentences if s["date"]), None)
     texts = [s["text"] for s in sentences]
-    blocks, dropped, v = candidate_blocks(st, ranked_ids, texts, config)
+    blocks, dropped, v = candidate_blocks(st, ranked_ids, texts, config, content_of=lambda mid: (get_message(ns, mid) or {}).get("content"))
     dropped = list(dropped) + [d for b in blocks for d in b.dropped]
     ruler = getattr(config, "ruler_version", 1)
     tokens = _fit(blocks, dropped, config.cards_tokens, ruler)
@@ -218,11 +236,11 @@ REJUDGE_NOTE = ("【重判】上一次你把下面这些句子写进了「缺口
                 "候选不对就仍然写进「缺口」，系统会按已知范围记为存疑，不会再找第三次。")
 
 
-def build_rejudge_request(st, ns, initial_req, prompt_text, sentences, gap_sentences, supp, config):
+def build_rejudge_request(st, ns, initial_req, prompt_text, sentences, gap_sentences, supp, config, content_of=None):
     """重判的请求：初判时展示的候选卡片、补找回来的候选（标「还没确认」）、整场对话（供理解）、要重判的句子。st 是 base_seq 时点的状态。
     返回请求 dict；found_threads／found_occasions 是补找回来的编号（重判可以用）。"""
     prompt = render_prompt(prompt_text, False)
-    v = _View(st)
+    v = _View(st, content_of)
     found_t, found_o = [], []
     for item in supp:
         for f in item["found"]:

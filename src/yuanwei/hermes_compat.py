@@ -30,6 +30,18 @@ DEPENDENCIES = [
      "affects": ["write"], "if_changed": "图片轮次的开始文字可能变了；先核新拍平规则，配不上时不记并显示原因"},
     {"id": "memory_sync_text", "what": "同步前的 _summarize_user_message_for_log、图片块与 native／API 图片提示（含默认问句）构造规则，和交给记忆的那句话（original_user_message 取 persist_user_message）的取法，与 v0.23.2 一致", "where": "agent/codex_responses_adapter.py: _summarize_user_message_for_log、_iter_content_parts 及类型集合；agent/image_routing.py: build_native_content_parts；gateway/session_api_media.py: restore_api_images；agent/turn_context.py: build_turn_context 里的 original_user_message = persist_user_message if … else user_message",
      "affects": ["write"], "if_changed": "图片标记、图片提示的拼接或交给记忆的那句话的取法可能变了；配不上的带图轮次不记并显示原因，先核新形状再改，不能靠放宽匹配"},
+    {"id": "clarify_result", "what": "助手问用户的 clarify 工具：结果行的 name／tool_name 是 clarify，正文是 {responses:[{question, choices_offered, status, user_response}], outcome[, notice]}；点选的答案已经换回原选项文字、去掉「(Recommended)」（0.1.0a8，清单第 53 条）", "where": "tools/clarify_tool.py: RECOMMENDED_LABEL、strip_recommended、_clean_answer、_response_status、_result",
+     "affects": ["clarify_answers"], "if_changed": "提问卡里的回答收不到，这一轮其余照常记；clarify-counts.json 里会出现 clarify_dropped:unknown_shape（bad_json、host_rewritten 不是格式变了：前者多半是 Hermes 外发前的密钥清洗弄坏了 JSON，后者是裁剪、去重、溢出这类固定改写）。先核新格式再放宽解析，不能靠猜"},
+    {"id": "clarify_turn_markers", "what": "认「这一轮从哪开始」用的两张表：Hermes 技能脚手架的开头（当一轮开头看）和 Hermes 自己追加的固定催促行（到达工具调用上限、压缩后续接；当脚手架看），和 hermes_clarify.TURN_START_PREFIXES、HOST_NUDGE_TEXTS 一致（0.1.0a8）", "where": "agent/skill_commands.py: _SKILL_INVOCATION_PREFIX、_AUTO_LOAD_PREFIX；agent/context_compressor.py: COMPRESSION_CONTINUATION_USER_CONTENT、_LEGACY_COMPRESSION_CONTINUATION_USER_CONTENT、MAX_ITERATIONS_SUMMARY_REQUEST；agent/tool_guardrails.py: _build_result_reference_stub（同一轮重复结果引用的开头，第 3 轮加）",
+     "affects": ["clarify_answers"], "if_changed": "技能轮里可能把上一轮的提问卡回答再存一次，或者碰到改了字的催促行就把这一轮的回答当「认不清」丢掉（clarify_dropped:turn_unclear）；要对着新文字改 hermes_clarify 的两张表"},
+    {"id": "midturn_redirect", "what": "助手没答完时用户又发一句（改口）：messages 里多一条普通用户行（没有 display_kind），api_content 以「[Context from the interrupted assistant response]\\n[This response was interrupted by a user correction.]」开头、以「\\n\\n＋正文」结尾；交给记忆的那句话变成「原句＋\\n\\nUser correction during the turn: ＋改口」；两次改口赶在一起并成「甲＋\\n\\n[Additional user correction]\\n＋乙」（0.1.0a9，清单第 55 条）", "where": "agent/conversation_loop.py: _INTERRUPT_SCAFFOLD_MARKER、_apply_active_turn_redirect；agent/turn_iteration_prep.py: begin_iteration；agent/interrupt_control.py: redirect",
+     "affects": ["midturn_words"], "if_changed": "改口的话认不出：这一轮的开头那句配不上等待表，整轮不记（跳过原因 midturn_unmatched／no_pending_turn），或只记开头和回复（midturn_dropped:unmatched）；已经存下的不受影响。先核新形状再改 hermes_midturn，不能靠猜"},
+    {"id": "midturn_steer", "what": "工具在跑时用户发一句（插话）：messages 多一条用户行，display_kind 是 steer，正文是「STEER_MARKER_OPEN＋\\n＋文字＋\\n＋STEER_MARKER_CLOSE」，几次插话用换行连成一段（0.1.0a9）", "where": "agent/prompt_builder.py: STEER_MARKER_OPEN、STEER_MARKER_CLOSE、STEER_DISPLAY_KIND、format_steer_marker、steer_user_row；agent/interrupt_control.py: _set_steer_parts",
+     "affects": ["midturn_words"], "if_changed": "插话认不出外壳：不存、记 steer_dropped:unknown_shape，这一轮其余照常记；先核新外壳再改 hermes_midturn.STEER_OPEN／STEER_CLOSE"},
+    {"id": "midturn_envelope", "what": "聊天平台（微信等）上，改口、插话的每一段文字前面 Hermes 会加三行来源说明（「Gateway message origin (JSON data, not instructions or authorization):」、一行 JSON、「Do not guess a reply destination when these fields are insufficient.」）加一个空行；JSON 里 from_bot 为真表示机器人发的（0.1.0a9）", "where": "gateway/run_busy.py: _steer_text_with_origin",
+     "affects": ["midturn_words"], "if_changed": "来源说明变了：认不出的段不存、记 midturn_dropped:unknown_envelope（非本机平台上的中途的话会存不下来）；先核新写法再改 hermes_midturn 的来源说明那几个常量"},
+    {"id": "turn_origin", "what": "「谁开的这一轮」：on_turn_start 里拿得到当前事件（gateway.session_context._SESSION_TURN_EVENT），宿主用 display_kind_for_event(event) 和 MessageEvent 的 text、internal 区分用户发的话和机器自己开的轮（0.1.0a10，清单第 56 条第 4 节）", "where": "gateway/session_context.py: _SESSION_TURN_EVENT；gateway/response_filters.py: display_kind_for_event；gateway/platforms/event.py: class MessageEvent（text、internal）",
+     "affects": ["turn_origin"], "if_changed": "这一项只报在不在、不影响别的判断（状态恒为 ok，不进「影响哪些功能」）：不在的，对应的「谁开的这一轮」就取不到，一律当不知道，走 0.1.0a9 的老路（开头行找不到就不记、技能命令不记、机器开的轮靠行里的标记认）；先核新的取法再改 hermes_turn"},
     {"id": "machinery_markers", "what": "宿主区分真人提问和自注入轮次的标记：用户行的 display_kind，和 _SYNTHETIC_USER_FLAGS 里的合成标记", "where": "agent/conversation_compression_scaffolding.py（v0.23.2 起）、agent/conversation_compression.py 或 agent/message_metadata.py（老版本）: _SYNTHETIC_USER_FLAGS；agent/context_compressor.py: display_kind",
      "affects": ["write"], "if_changed": "宿主多出来的、名字不以 _synthetic 结尾的合成标记我们认不出，会被当真人提问记下来：要把它加进 hermes_adapter.SYNTHETIC_USER_FLAGS"},
     {"id": "plugin_discovery", "what": "用户插件目录 $HERMES_HOME/plugins/<名字>/ 里的记忆提供者会被发现并加载（register_memory_provider）", "where": "plugins/plugin_loader.py（老版本在 plugins/memory/__init__.py）: get_hermes_home() / \"plugins\"；plugins/memory/__init__.py: register_memory_provider",
@@ -553,8 +565,260 @@ def _check_image_text(rd):
     return out
 
 
+# 0.1.0a8（清单第 53 条）：clarify 结果的构造函数，只读源码 AST 指纹（对着 Hermes ae2a81ccc0／v0.23.2 算；2bd378ed1b 相同；0e427d788d 是下面认作「对」的旧指纹之一（_result 还没有 shown 换回，格式相同）；935c1e89 没有后三个函数）。
+# doctor 只在线下核，不开关运行时的功能；运行时靠严格解析把关（hermes_clarify.parse，格式不对整条拒收）。
+CLARIFY_CONTRACTS = {"tools/clarify_tool.py": (["RECOMMENDED_LABEL", "strip_recommended", "_clean_answer", "_response_status", "_result"], "16fda8ede5f7fe29c07923adab9d2ace527f449cb663d8fcd5b9d7fc243ed570")}
+# 更早的两版（5eea87882a 到 v0.21.6；v0.21.7 到 v0.22.5）：结果格式和现在一样（解析照样认），只是 _result 还没把展示用的选项换回原文（shown），
+# 点选的展示文字和原选项不一样时会被记成「用户答」。算 ok，说明里写清楚（复核第 14 条）。
+CLARIFY_OLDER_OK = {"e079516ebc9bfd7683ba0d02ea52ea7d8a794f2b65a0e3f181852cee77ca62f6": "5eea87882a–v0.21.6",
+                    "83dd409638091752734f514b8735296fff732d7493715e85666a3cf15d058b1c": "v0.21.7–v0.22.5"}
+
+
+def _check_clarify(rd):
+    missing, changed, older = [], [], []
+    for rel, (names, expected) in CLARIFY_CONTRACTS.items():
+        tree, err = _parse(rd, rel)
+        if tree is None:
+            missing.append(rel)
+            continue
+        nodes = [n for n in tree.body if (n.name if isinstance(n, ast.FunctionDef) else
+                 n.targets[0].id if isinstance(n, ast.Assign) and isinstance(n.targets[0], ast.Name) else None) in names]
+        if len(nodes) != len(names):
+            missing.append(rel + "（函数或常量不全）")
+        else:
+            got = hashlib.sha256(json.dumps(_contract_shape(nodes), ensure_ascii=True).encode()).hexdigest()
+            if got in CLARIFY_OLDER_OK:
+                older.append(CLARIFY_OLDER_OK[got])
+            elif got != expected:
+                changed.append(rel)
+    status = "missing" if missing else "changed" if changed else "ok"
+    detail = ("没核：缺少或读不懂 " + "、".join(missing)) if missing else ("clarify 结果的构造变了，没核新格式：" + "、".join(changed)) if changed else \
+        ("clarify 结果的格式和 v0.23.2 相同，回答照收；这一版（%s）还没把展示用的选项换回原文，点选的展示文字和原选项不一样时会记成「用户答」（只读源码）" % "、".join(older)) if older else \
+        "clarify 结果的构造（字段、状态、点选换回原选项、去掉推荐标签）与核过的 Hermes v0.23.2 一致（只读源码）"
+    return [_res(_dep("clarify_result"), status, detail)]
+
+
+def _joined_consts(node):
+    """f-string 里的字面段和插值段：[("c", 字面)｜("v", 变量名或 None)]。"""
+    out = []
+    for v in node.values:
+        if isinstance(v, ast.Constant):
+            out.append(("c", v.value))
+        else:
+            out.append(("v", v.value.id if isinstance(getattr(v, "value", None), ast.Name) else None))
+    return out
+
+
+def _joineds(fn):
+    return [n for n in ast.walk(fn) if isinstance(n, ast.JoinedStr)] if fn is not None else []
+
+
+def _dicts_with(fn, *keys):
+    out = []
+    for n in ast.walk(fn) if fn is not None else ():
+        if isinstance(n, ast.Dict):
+            ks = [k.value for k in n.keys if isinstance(k, ast.Constant)]
+            if all(k in ks for k in keys):
+                out.append((n, ks))
+    return out
+
+
+def _dict_values(d):
+    return {k.value: v for k, v in zip(d.keys, d.values) if isinstance(k, ast.Constant)}
+
+
+def _check_midturn(rd):
+    """0.1.0a9（清单第 55 条）：改口、插话、聊天平台来源说明三项，只读源码的 AST（不执行）；对不上只报、不猜。"""
+    from . import hermes_midturn as HM
+    out = []
+    # ---- 改口
+    dep, bad, miss = _dep("midturn_redirect"), [], []
+    cl, e1 = _parse(rd, "agent/conversation_loop.py")
+    tp, e2 = _parse(rd, "agent/turn_iteration_prep.py")
+    ic, e3 = _parse(rd, "agent/interrupt_control.py")
+    for rel, t in (("agent/conversation_loop.py", cl), ("agent/turn_iteration_prep.py", tp), ("agent/interrupt_control.py", ic)):
+        if t is None:
+            miss.append(rel)
+    if not miss:
+        marker = _literal_assigns(cl, ("_INTERRUPT_SCAFFOLD_MARKER",)).get("_INTERRUPT_SCAFFOLD_MARKER")
+        want_marker = HM.REDIRECT_API_PREFIX.split("\n", 1)[1]
+        fn = _function_node(cl, "_apply_active_turn_redirect")
+        if marker != want_marker:
+            bad.append("_INTERRUPT_SCAFFOLD_MARKER 变了或不在")
+        if fn is None:
+            bad.append("没有 _apply_active_turn_redirect")
+        else:
+            ctx = HM.REDIRECT_API_PREFIX.split("\n", 1)[0]
+            ok_join = any(_joined_consts(j)[:1] == [("c", ctx + "\n")] and [c for c in _joined_consts(j) if c[0] == "c"] == [("c", ctx + "\n"), ("c", "\n\n")] and _joined_consts(j)[-1] == ("v", "text") for j in _joineds(fn))
+            if not ok_join:
+                bad.append("api_content 的拼法（开头两句、结尾「\\n\\n＋正文」）变了")
+            rows = [(d, ks) for d, ks in _dicts_with(fn, "role", "content", "api_content")]
+            if not rows:
+                bad.append("改口用户行不再带 api_content")
+            elif any("display_kind" in ks for _d, ks in rows):
+                bad.append("改口用户行带了 display_kind（原委靠它没有来认改口行）")
+            else:
+                vals = _dict_values(rows[0][0])
+                if not (isinstance(vals.get("role"), ast.Constant) and vals["role"].value == "user"):
+                    bad.append("改口行的 role 不再是 user")
+                if not (isinstance(vals.get("content"), ast.Name) and vals["content"].id == "text"):
+                    bad.append("改口行的 content 不再就是用户的原话（text）")
+            parts = [n for n in ast.walk(fn) if isinstance(n, ast.Assign) and any(isinstance(t, ast.Name) and t.id == "checkpoint_parts" for t in n.targets)]
+            if not parts or not (isinstance(parts[0].value, ast.List) and parts[0].value.elts and isinstance(parts[0].value.elts[0], ast.Name) and parts[0].value.elts[0].id == "_INTERRUPT_SCAFFOLD_MARKER"):
+                bad.append("checkpoint_parts 不再以 _INTERRUPT_SCAFFOLD_MARKER 开头")
+        bi = _function_node(tp, "begin_iteration")
+        if bi is None or not any(_joined_consts(j) == [("v", "original_user_message"), ("c", HM.REDIRECT_SEP), ("v", "_redirect_text")] for j in _joineds(bi)):
+            bad.append("begin_iteration 里拼「原句＋\\n\\nUser correction during the turn: ＋改口」的那一句变了")
+        rd_fn = _function_node(ic, "redirect")
+        if rd_fn is None or not any(_joined_consts(j) == [("v", "existing"), ("c", HM.REDIRECT_MERGE), ("v", "cleaned")] for j in _joineds(rd_fn)):
+            bad.append("redirect 里合并两次改口的那一句变了")
+    out.append(_res(dep, "missing" if miss else "changed" if bad else "ok",
+                    ("没核：缺少或读不懂 " + "、".join(miss)) if miss else ("改口的形状变了，没核新行为：" + "；".join(bad)) if bad else
+                    "改口行（api_content 两句开头、没有 display_kind）、拼进原句的「User correction during the turn: 」、合并两次改口的「[Additional user correction]」和 v0.23.2 一致（只读源码）"))
+    # ---- 插话
+    dep, bad, miss = _dep("midturn_steer"), [], []
+    pb, e4 = _parse(rd, "agent/prompt_builder.py")
+    for rel, t in (("agent/prompt_builder.py", pb), ("agent/interrupt_control.py", ic)):
+        if t is None:
+            miss.append(rel)
+    if not miss:
+        lit = _literal_assigns(pb, ("STEER_MARKER_OPEN", "STEER_MARKER_CLOSE", "STEER_DISPLAY_KIND"))
+        for name, want in (("STEER_MARKER_OPEN", HM.STEER_OPEN), ("STEER_MARKER_CLOSE", HM.STEER_CLOSE), ("STEER_DISPLAY_KIND", HM.STEER_DISPLAY_KIND)):
+            if lit.get(name) != want:
+                bad.append("%s 变了或不在" % name)
+        fm = _function_node(pb, "format_steer_marker")
+        if fm is None or not any(_joined_consts(j) == [("c", "\n\n"), ("v", "STEER_MARKER_OPEN"), ("c", "\n"), ("v", "steer_text"), ("c", "\n"), ("v", "STEER_MARKER_CLOSE")] for j in _joineds(fm)):
+            bad.append("format_steer_marker 的拼法变了")
+        su = _function_node(pb, "steer_user_row")
+        found = _dicts_with(su, "role", "content", "display_kind")
+        if not found:
+            bad.append("steer_user_row 不再给 display_kind")
+        else:
+            d = found[0][0]
+            vals = _dict_values(d)
+            if not (isinstance(vals.get("role"), ast.Constant) and vals["role"].value == "user"):
+                bad.append("steer_user_row 的 role 不再是 user")
+            if not (isinstance(vals["display_kind"], ast.Name) and vals["display_kind"].id == "STEER_DISPLAY_KIND"):
+                bad.append("steer_user_row 的 display_kind 不是 STEER_DISPLAY_KIND")
+            c = vals["content"]
+            if not (isinstance(c, ast.Call) and isinstance(c.func, ast.Attribute) and c.func.attr == "lstrip" and isinstance(c.func.value, ast.Call)
+                    and isinstance(c.func.value.func, ast.Name) and c.func.value.func.id == "format_steer_marker"):
+                bad.append("steer_user_row 的正文不再是 format_steer_marker(…).lstrip()")
+        sp = _function_node(ic, "_set_steer_parts")
+        if sp is None or not any(isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute) and n.func.attr == "join" and isinstance(n.func.value, ast.Constant) and n.func.value.value == "\n" for n in ast.walk(sp)):
+            bad.append("几次插话不再用换行连成一段（_set_steer_parts）")
+    out.append(_res(dep, "missing" if miss else "changed" if bad else "ok",
+                    ("没核：缺少或读不懂 " + "、".join(miss)) if miss else ("插话的形状变了，没核新行为：" + "；".join(bad)) if bad else
+                    "插话行（display_kind＝steer、两个外壳常量、换行连成一段）和 v0.23.2 一致（只读源码）"))
+    # ---- 聊天平台的来源说明
+    dep, bad = _dep("midturn_envelope"), []
+    rb, e5 = _parse(rd, "gateway/run_busy.py")
+    if rb is None:
+        out.append(_res(dep, "missing", "没核：缺少或读不懂 gateway/run_busy.py"))
+    else:
+        fn = _function_node(rb, "_steer_text_with_origin")
+        want = [("c", HM.ENVELOPE_HEAD + "\n"), ("v", "encoded"), ("c", "\n" + HM.ENVELOPE_FOOT + "\n\n"), ("v", "text")]
+        if fn is None:
+            bad.append("没有 _steer_text_with_origin")
+        else:
+            if not any(_joined_consts(j) == want for j in _joineds(fn)):
+                bad.append("三行来源说明的字、JSON 那一行的位置或结尾的空行变了")
+            if not any(isinstance(n, ast.Constant) and n.value == "from_bot" for n in ast.walk(fn)):
+                bad.append("JSON 里不再有 from_bot")
+            dumps = [n for n in ast.walk(fn) if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute) and n.func.attr == "dumps"]
+            if not dumps:
+                bad.append("来源说明那一行不再用 json.dumps 写")
+            elif any(k.arg == "indent" for n in dumps for k in n.keywords):
+                bad.append("json.dumps 加了 indent（来源说明的 JSON 不再是一行）")
+        out.append(_res(dep, "changed" if bad else "ok", ("来源说明变了，没核新行为：" + "；".join(bad)) if bad else
+                        "三行来源说明（首行、JSON 一行、末行）加空行和 from_bot 与 v0.23.2 一致（只读源码）"))
+    return out
+
+
+def _literal_assigns(tree, names):
+    """模块顶层 名字 = 字面量 的值；不是字面量或找不到的不收。"""
+    out = {}
+    for n in tree.body:
+        if isinstance(n, ast.Assign) and len(n.targets) == 1 and isinstance(n.targets[0], ast.Name) and n.targets[0].id in names:
+            try:
+                out[n.targets[0].id] = ast.literal_eval(n.value)
+            except ValueError:
+                pass
+    return out
+
+
+def _dedupe_stub_prefix(rd):
+    """agent/tool_guardrails.py 里 _build_result_reference_stub 第一个以「[hermes note:」开头的 f-string 的开头字面；找不到函数返回 None，函数在但没有这种字面返回 ""。"""
+    tree, err = _parse(rd, "agent/tool_guardrails.py")
+    if tree is None:
+        return None
+    fn = next((n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef) and n.name == "_build_result_reference_stub"), None)
+    if fn is None:
+        return None
+    for n in ast.walk(fn):
+        if isinstance(n, ast.JoinedStr) and n.values and isinstance(n.values[0], ast.Constant) and isinstance(n.values[0].value, str) and n.values[0].value.startswith("[hermes note:"):
+            return n.values[0].value
+    return ""
+
+
+def _check_clarify_markers(rd):
+    from . import hermes_clarify as HCL
+    want = (("agent/skill_commands.py", ("_SKILL_INVOCATION_PREFIX", "_AUTO_LOAD_PREFIX"), set(HCL.TURN_START_PREFIXES)),
+            ("agent/context_compressor.py", ("COMPRESSION_CONTINUATION_USER_CONTENT", "_LEGACY_COMPRESSION_CONTINUATION_USER_CONTENT", "MAX_ITERATIONS_SUMMARY_REQUEST"), set(HCL.HOST_NUDGE_TEXTS)))
+    missing, changed = [], []
+    for rel, names, ours in want:
+        tree, err = _parse(rd, rel)
+        if tree is None:
+            missing.append(rel)
+            continue
+        got = _literal_assigns(tree, names)
+        if len(got) != len(names):
+            missing.append("%s（缺 %s）" % (rel, "、".join(x for x in names if x not in got)))
+        elif set(got.values()) != ours:
+            changed.append(rel)
+    stub = _dedupe_stub_prefix(rd)                                                           # 同一轮里一字不差的重复结果换成的引用：开头还是不是 HOST_REWRITE_PREFIXES 里那一条
+    if stub is None:
+        missing.append("agent/tool_guardrails.py（找不到 _build_result_reference_stub）")
+    elif not stub.startswith(HCL.HOST_REWRITE_PREFIXES[-1]):
+        changed.append("agent/tool_guardrails.py（重复结果引用的开头）")
+    status = "missing" if missing else "changed" if changed else "ok"
+    detail = ("没核：缺少或读不懂 " + "、".join(missing)) if missing else ("认一轮开头用的文字变了，没核：" + "、".join(changed)) if changed else \
+        "技能脚手架的开头、固定催促行的文字、同一轮重复结果的引用开头和原委的表一致（只读源码）"
+    return [_res(_dep("clarify_turn_markers"), status, detail)]
+
+
+def _check_turn_origin(rd):
+    """只报在不在（只读源码的 AST，不执行）：三处缺哪一处、哪处读不到，都写进说明；状态恒为 ok，不影响别的判断。"""
+    present, absent = [], []
+    tree, err = _parse(rd, "gateway/session_context.py")
+    if tree is None:
+        absent.append("gateway/session_context.py（%s）" % ("读不到" if err == "missing" else "读不懂"))
+    else:
+        names = {t.id for n in tree.body if isinstance(n, ast.Assign) for t in n.targets if isinstance(t, ast.Name)} | \
+                {n.target.id for n in tree.body if isinstance(n, ast.AnnAssign) and isinstance(n.target, ast.Name)}
+        (present if "_SESSION_TURN_EVENT" in names else absent).append("_SESSION_TURN_EVENT")
+    tree, err = _parse(rd, "gateway/response_filters.py")
+    if tree is None:
+        absent.append("gateway/response_filters.py（%s）" % ("读不到" if err == "missing" else "读不懂"))
+    else:
+        (present if _function_node(tree, "display_kind_for_event") is not None else absent).append("display_kind_for_event")
+    tree, err = _parse(rd, "gateway/platforms/event.py")
+    if tree is None:
+        absent.append("gateway/platforms/event.py（%s）" % ("读不到" if err == "missing" else "读不懂"))
+    else:
+        cls = next((n for n in ast.walk(tree) if isinstance(n, ast.ClassDef) and n.name == "MessageEvent"), None)
+        if cls is None:
+            absent.append("MessageEvent")
+        else:
+            fields = {n.target.id for n in cls.body if isinstance(n, ast.AnnAssign) and isinstance(n.target, ast.Name)}
+            for f in ("text", "internal"):
+                (present if f in fields else absent).append("MessageEvent.%s" % f)
+    detail = ("在：" + "、".join(present) if present else "在：无") + ("；不在或读不到：" + "、".join(absent) + "（只报在不在，不影响别的判断；缺的那部分「谁开的这一轮」取不到，当不知道）" if absent else "（只报在不在，只读源码）")
+    return [_res(_dep("turn_origin"), "ok", detail)]
+
+
 def doctor_from_reader(rd, hermes_info=None):
-    checks = _check_base(rd) + _check_host(rd) + _check_install(rd) + _check_workspace(rd) + _check_lazy(rd) + _check_bots(rd) + _check_plugin_deps(rd) + _check_prefetch_limit(rd) + _check_image_text(rd)
+    checks = _check_base(rd) + _check_host(rd) + _check_install(rd) + _check_workspace(rd) + _check_lazy(rd) + _check_bots(rd) + _check_plugin_deps(rd) + _check_prefetch_limit(rd) + _check_image_text(rd) + _check_clarify(rd) + _check_clarify_markers(rd) + _check_midturn(rd) + _check_turn_origin(rd)
     order = {d["id"]: i for i, d in enumerate(DEPENDENCIES)}
     checks.sort(key=lambda c: order[c["id"]])
     summary = {s: sum(1 for c in checks if c["status"] == s) for s in ("ok", "changed", "missing")}

@@ -123,7 +123,8 @@ def run_step(store, ns, step_id, session_id, k, messages, judge, clock, config=N
                         gap_sids.append(sid)
             by_sid = {s["sid"]: s for s in sentences}
             gap_sentences = [by_sid[sid] for sid in sorted(gap_sids, key=lambda x: int(x[1:]))]
-            q2req = LC.build_rejudge_request(st, ns, q1req, prompt_text, sentences, gap_sentences, supp, config)
+            q2req = LC.build_rejudge_request(st, ns, q1req, prompt_text, sentences, gap_sentences, supp, config,
+                                             content_of=lambda mid: (store.get_message(ns, mid) or {}).get("content"))     # 只为给提问卡回答的句子补标签显示
             base["requests"]["q2"] = q2req
             q2_task_fp = _fp({"q": "l2", "prompt": WC.sha256_hex(LC.render_prompt(prompt_text, False)), "split": config.split_version, "base_seq": base_seq, "q1": _fp(q1), "supp": supp,
                               "text": WC.sha256_hex(q2req["text"])})
